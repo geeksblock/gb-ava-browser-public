@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+
+  # The M0 acceptance claims are behavioural, so they are gated here too: a real
+  # Chromium with the extension loaded, driven through the bridge's HTTP surface.
+  # Headful Chromium is required for extension loading, hence xvfb.
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - name: Integration (extension + bridge)
+        run: xvfb-run -a npx playwright test --project=integration
+      # A shortened soak in CI: the five-minute window is the local gate
+      # (`npm run test:keepalive`), this proves the keepalive path is live in CI.
+      - name: Keepalive soak (90 s)
+        run: AVA_KEEPALIVE_IDLE_SECONDS=90 xvfb-run -a npx playwright test --project=keepalive
+      - name: Upload keepalive evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: keepalive-evidence
+          path: test-results/*.json
+          if-no-files-found: warn

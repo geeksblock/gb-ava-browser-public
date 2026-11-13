@@ -1,0 +1,13 @@
+{
+  "_comment": "Chrome/Edge enterprise force-install policy for the Geeksblock Ava Browser Extension. Replace the update_url with where the CRX and update manifest are hosted, and the id with the extension id Chrome assigns when the CRX is signed with the org key.",
+  "ExtensionSettings": {
+    "<EXTENSION_ID>": {
+      "installation_mode": "force_installed",
+      "update_url": "https://example.invalid/gb-ava-browser/updates.xml",
+      "toolbar_pin": "force_pinned"
+    }
+  },
+  "ExtensionInstallForcelist": [
+    "<EXTENSION_ID>;https://example.invalid/gb-ava-browser/updates.xml"
+  ]
+}

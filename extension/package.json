@@ -1,0 +1,10 @@
+{
+  "name": "@gb-ava/extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MV3 extension: the Ava browser path into the owner's real Chrome profile",
+  "dependencies": {
+    "@gb-ava/protocol": "0.1.0"
+  }
+}

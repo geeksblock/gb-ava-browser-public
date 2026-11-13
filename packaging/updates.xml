@@ -1,0 +1,10 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!--
+  Chrome's update manifest for a self-hosted extension. `codebase` points at the
+  signed .crx; `version` must match the packaged manifest exactly.
+-->
+<gupdate xmlns='http://www.google.com/update2/response' protocol='2.0'>
+  <app appid='<EXTENSION_ID>'>
+    <updatecheck codebase='https://example.invalid/gb-ava-browser/gb-ava-extension-0.1.0.crx' version='0.1.0' />
+  </app>
+</gupdate>

@@ -1,0 +1,11 @@
+{
+  "name": "@gb-ava/adapter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cua-shaped browser_* tools over the Ava bridge",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "dependencies": {},
+  "devDependencies": {}
+}

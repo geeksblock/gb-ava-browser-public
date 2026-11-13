@@ -1,0 +1,44 @@
+{
+  "name": "gb-ava-browser",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Geeksblock Ava Browser Extension \u2014 background Chrome control for Ava",
+  "license": "UNLICENSED",
+  "author": "Geeksblock LLC",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "shared",
+    "bridge",
+    "extension",
+    "adapter",
+    "mcp"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:unit": "vitest run",
+    "test:integration": "playwright test --project=integration",
+    "test:keepalive": "playwright test --project=keepalive",
+    "icons": "node scripts/render-icons.mjs",
+    "screenshot:options": "node scripts/screenshot-options.mjs",
+    "bridge": "node bridge/dist/cli.js serve",
+    "bridge:health": "node bridge/dist/cli.js health",
+    "bridge:token": "node bridge/dist/cli.js token",
+    "typecheck:adapter": "tsc -p tsconfig.adapter.json --noEmit",
+    "package": "npm run build && node scripts/package-extension.mjs"
+  },
+  "devDependencies": {
+    "@phosphor-icons/core": "^2.1.1",
+    "@playwright/test": "^1.64.1",
+    "@types/chrome": "^0.3.7",
+    "@types/node": "^26.6.6",
+    "@types/ws": "^8.18.2",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}

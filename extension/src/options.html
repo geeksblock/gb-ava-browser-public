@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Geeksblock Ava Browser Extension — settings</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main class="sheet">
+      <header class="masthead">
+        <div>
+          <p class="eyebrow">Geeksblock Ava Browser Extension</p>
+          <h1>Bridge connection</h1>
+          <p class="lede">
+            Ava talks to this browser over a loopback socket run by the local Geeksblock bridge. Paste
+            the per-install token once; it stays in this browser profile and is never sent anywhere else.
+          </p>
+        </div>
+        <span class="badge" id="phase-badge" data-phase="unknown">unknown</span>
+      </header>
+
+      <section class="card" aria-labelledby="connection-heading">
+        <h2 id="connection-heading">Connection</h2>
+        <form id="settings-form" autocomplete="off">
+          <div class="field">
+            <label for="bridge-url">Bridge address</label>
+            <input id="bridge-url" name="bridge-url" type="text" spellcheck="false" placeholder="ws://127.0.0.1:8765" />
+            <p class="hint">Loopback only. The bridge binds 127.0.0.1; use the port it printed when it started.</p>
+          </div>
+          <div class="field">
+            <label for="bridge-token">Token</label>
+            <input id="bridge-token" name="bridge-token" type="password" spellcheck="false" placeholder="paste the token from gb-ava-bridge token" />
+            <p class="hint" id="token-hint">Saved token fingerprint: <span class="mono" id="token-fingerprint">none</span></p>
+          </div>
+          <div class="actions">
+            <button type="submit" class="primary">Save and connect</button>
+            <button type="button" id="reconnect">Reconnect</button>
+            <button type="button" id="clear" class="ghost">Forget token</button>
+          </div>
+          <p class="notice" id="notice" role="status" hidden></p>
+        </form>
+      </section>
+
+      <section class="card" aria-labelledby="permissions-heading">
+        <h2 id="permissions-heading">Agent permissions</h2>
+        <label class="switch" for="evaluate-enabled">
+          <input id="evaluate-enabled" name="evaluate-enabled" type="checkbox" />
+          <span>
+            <strong>Allow page.evaluate</strong>
+            <span class="hint">
+              Lets Ava run a single JavaScript expression inside a page when the ordinary read and click
+              methods are not enough. Most powerful and least predictable method, so it is off by default.
+              Only you can switch it on here; Ava can see the setting but cannot change it. Takes effect on
+              the next command.
+            </span>
+          </span>
+        </label>
+        <p class="hint" id="evaluate-note">Currently off — <code>page.evaluate</code> returns <code>evaluate_disabled</code>.</p>
+      </section>
+
+      <section class="card" aria-labelledby="status-heading">
+        <h2 id="status-heading">Status</h2>
+        <dl class="status">
+          <div><dt>Supervisor</dt><dd id="status-phase">—</dd></div>
+          <div><dt>Session</dt><dd id="status-session" class="mono">—</dd></div>
+          <div><dt>Worker uptime</dt><dd id="status-uptime">—</dd></div>
+          <div><dt>Worker starts (this install)</dt><dd id="status-starts">—</dd></div>
+          <div><dt>Offscreen keepalive</dt><dd id="status-offscreen">—</dd></div>
+          <div><dt>Alarm heartbeat</dt><dd id="status-alarm">—</dd></div>
+          <div><dt>Keepalive ticks</dt><dd id="status-ticks">—</dd></div>
+          <div><dt>Reconnect attempts</dt><dd id="status-attempts">—</dd></div>
+          <div><dt>Last error</dt><dd id="status-error">—</dd></div>
+        </dl>
+        <p class="hint">This page refreshes every 5 seconds while open.</p>
+      </section>
+
+      <footer class="footer">
+        <span>Geeksblock LLC</span>
+        <span>© <span id="year">2026</span> Geeksblock LLC. All rights reserved.</span>
+      </footer>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>

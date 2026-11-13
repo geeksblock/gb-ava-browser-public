@@ -1,0 +1,9 @@
+{
+  "name": "@gb-ava/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP server exposing the Cua-shaped browser tools over stdio",
+  "main": "dist/index.js",
+  "bin": { "gb-ava-browser-mcp": "dist/index.js" }
+}
