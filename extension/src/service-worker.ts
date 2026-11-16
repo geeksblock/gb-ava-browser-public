@@ -17,6 +17,8 @@
  */
 
 import {
+  BUILD_ID,
+  BUILT_AT,
   PROTOCOL_VERSION,
   PRODUCT_NAME,
   createLogger,
@@ -469,6 +471,10 @@ function sendHello(): void {
       version: chrome.runtime.getManifest().version,
       extensionId: chrome.runtime.id,
       resumed: supervisor.hasHandshaked,
+      // Which build this worker is, so the bridge can tell a stale
+      // extension from a broken one instead of guessing.
+      build: BUILD_ID,
+      builtAt: BUILT_AT,
     },
   };
   send(hello);
@@ -599,9 +605,15 @@ async function handleBridgeRequest(id: string, method: string, params: JsonObjec
   if (!isKnownMethod(method)) {
     // Fail closed either way: a reserved-but-unbuilt method says which milestone
     // owns it, anything else is genuinely unknown. Neither is ever a no-op.
+    //
+    // The build stamp travels with both answers: an `unknown_method` for a
+    // method the caller's protocol table defines is the signature of an extension
+    // running an older build, and the bridge turns this detail into that
+    // diagnosis instead of leaving the caller to file a "missing handler" bug.
+    const buildDetail = { extensionBuild: BUILD_ID, extensionBuiltAt: BUILT_AT };
     const error = isV1Method(method)
-      ? makeError("not_implemented", `${method} is reserved in protocol v1 but not built yet`)
-      : makeError("unknown_method", `unknown method: ${method}`);
+      ? makeError("not_implemented", `${method} is reserved in protocol v1 but not built yet`, false, buildDetail)
+      : makeError("unknown_method", `unknown method: ${method}`, false, buildDetail);
     record(error.code);
     send(errorResponse(id, error));
     return;
@@ -944,6 +956,9 @@ async function buildHealth(): Promise<JsonObject> {
       name: PRODUCT_NAME,
       version: chrome.runtime.getManifest().version,
       id: chrome.runtime.id ?? null,
+      // What is actually running, readable without trusting the bundle.
+      build: BUILD_ID,
+      builtAt: BUILT_AT,
     },
     browser: { userAgent: navigator.userAgent },
     settings: {

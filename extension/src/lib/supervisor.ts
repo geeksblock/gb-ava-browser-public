@@ -176,6 +176,13 @@ export function reduce(state: SupervisorState, event: SupervisorEvent, options: 
         if (state.nextAttemptAt !== undefined && event.now >= state.nextAttemptAt) {
           return { state: toConnecting(state, event.now, effects), effects };
         }
+        // Early: the retry timer can fire a little before `nextAttemptAt` by the
+        // wall clock (timers count from a cached loop clock that lags it, more so
+        // under load). Doing nothing here dropped the retry until the next
+        // keepalive tick, up to 20 s later, so re-arm it for the remainder.
+        if (state.nextAttemptAt !== undefined) {
+          effects.push({ type: "schedule_retry", delayMs: Math.max(1, state.nextAttemptAt - event.now), attempt: state.attempts });
+        }
         return { state, effects };
       }
       if (state.phase === "connecting" || state.phase === "handshaking") {

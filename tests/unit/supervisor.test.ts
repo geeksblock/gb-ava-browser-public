@@ -131,6 +131,15 @@ describe("supervisor — reconnect loop", () => {
 
     const early = run([{ type: "tick", now: T0 + 5_100 }], dropped.state);
     expect(early.state.phase).toBe("backoff");
+    // An early tick (a timer firing just before its due time by the wall clock)
+    // re-arms the retry for the remainder instead of dropping it until the next
+    // keepalive tick, which in a real browser can be 20 s away.
+    const rearmed = early.effects.find((effect) => effect.type === "schedule_retry") as
+      | { type: "schedule_retry"; delayMs: number }
+      | undefined;
+    expect(rearmed?.delayMs).toBe((dropped.state.nextAttemptAt ?? 0) - (T0 + 5_100));
+    const oneMsEarly = run([{ type: "tick", now: (dropped.state.nextAttemptAt ?? 0) - 1 }], dropped.state);
+    expect(oneMsEarly.effects.find((effect) => effect.type === "schedule_retry")).toMatchObject({ delayMs: 1 });
 
     const due = run([{ type: "tick", now: (dropped.state.nextAttemptAt ?? 0) + 1 }], dropped.state);
     expect(due.state.phase).toBe("connecting");

@@ -23,11 +23,15 @@ import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
 import {
   BRIDGE_PRODUCT_NAME,
+  BUILD_ID,
+  BUILT_AT,
   HANDSHAKE_TIMEOUT_MS,
+  MAX_MESSAGE_LENGTH,
   isV1Method,
   PROTOCOL_VERSION,
   WS_CLOSE,
   errorResponse,
+  isBuildLabel,
   isClientAuth,
   isClientHello,
   isControlFrame,
@@ -100,6 +104,18 @@ const LONG_RUNNING_METHODS = new Set(["page.waitFor", "page.download", "page.eva
 const LONG_RUNNING_TIMEOUT_MS = 65_000;
 const PEER_DEAD_AFTER_MS = 10_000;
 
+/**
+ * The two cures for a build mismatch. Which one applies depends on which
+ * side is older: a rebuilt unpacked extension keeps the worker script Chrome
+ * cached at its last load (a Chrome restart does not refresh it), while a bridge
+ * process keeps whatever bundle it was started with (a login service that keeps
+ * it running survives rebuilds).
+ */
+const RELOAD_EXTENSION_HINT =
+  "reload the unpacked extension at chrome://extensions (a Chrome restart does not refresh an unpacked extension)";
+const RESTART_BRIDGE_HINT =
+  "restart the bridge to load the newer code (stop and start `gb-ava-bridge serve`, or restart the login service that runs it)";
+
 export interface BridgeOptions {
   port: number;
   token: string;
@@ -114,8 +130,32 @@ export interface BridgeOptions {
   uploadDirectory?: string;
 }
 
+/**
+ * One side's build identity: the commit it was built from and when.
+ * `builtAt` is null when a side reports a build id but no timestamp (the hello
+ * fields are independently optional); the ordering is then unknown, so the
+ * diagnosis names both builds instead of guessing which is older.
+ */
+export interface BuildView {
+  id: string;
+  builtAt: string | null;
+}
+
 export interface BridgeHealth {
   ok: true;
+  /**
+   * Both sides' build identities, side by side. A rebuilt unpacked extension can
+   * keep serving the script Chrome cached at its last load, so "the extension is
+   * stale" is a fact this health answer must be able to state rather than a
+   * theory an agent has to guess at.
+   */
+  build: {
+    bridge: BuildView;
+    /** null when no extension is connected, or it predates build stamping. */
+    extension: BuildView | null;
+    /** true when both report a stamp and they differ; null when nothing can be compared. */
+    mismatch: boolean | null;
+  };
   bridge: {
     name: string;
     version: string;
@@ -417,6 +457,91 @@ export function createBridge(options: BridgeOptions): Bridge {
   }
 
   /**
+   * Which side is older, when both carry a parseable timestamp. Null when the
+   * order cannot be established, in which case the diagnosis names both builds
+   * rather than guessing.
+   */
+  function olderSide(
+    extension: { build: string; builtAt: string | null },
+    bridge: { build: string; builtAt: string },
+  ): "extension" | "bridge" | null {
+    if (extension.builtAt === null) return null;
+    const extensionTime = Date.parse(extension.builtAt);
+    const bridgeTime = Date.parse(bridge.builtAt);
+    if (Number.isNaN(extensionTime) || Number.isNaN(bridgeTime) || extensionTime === bridgeTime) return null;
+    return extensionTime < bridgeTime ? "extension" : "bridge";
+  }
+
+  /**
+   * Turn `unknown_method` / `not_implemented` into the diagnosis a caller can act
+   * on.
+   *
+   * The extension bakes its build id into the error detail. When that id is not
+   * this bridge's build id, the method is not missing from the code — one of the
+   * two sides is stale. Which one is decided from the build timestamps when they
+   * are both present: a rebuilt unpacked extension keeps the worker script Chrome
+   * cached at its last load, while a bridge process keeps the bundle it started
+   * with. Blaming the extension unconditionally (the first cut of this change) was
+   * wrong for the long-lived-bridge workflow, where the bridge is the older side.
+   *
+   * A same-build answer is explicitly not called stale: for `unknown_method` that
+   * means a real code bug; for `not_implemented` it means the method is genuinely
+   * reserved-but-unbuilt in this build.
+   */
+  function withStaleBuildDiagnosis(payload: ErrorPayload): ErrorPayload {
+    if (payload.code !== "unknown_method" && payload.code !== "not_implemented") return payload;
+    const detail = isPlainObject(payload.detail) ? payload.detail : {};
+    const reportedBuild = detail["extensionBuild"];
+    const reportedAt = detail["extensionBuiltAt"];
+    // The same bound the hello gets: these strings are quoted into the message.
+    const extensionBuild = isBuildLabel(reportedBuild) ? reportedBuild : (activePeer?.hello?.client.build ?? null);
+    const extensionBuiltAt = isBuildLabel(reportedAt) ? reportedAt : (activePeer?.hello?.client.builtAt ?? null);
+
+    let hint: string;
+    let older: "extension" | "bridge" | null = null;
+    if (extensionBuild === null) {
+      hint = `the extension reported no build id, so it predates build stamping — ${RELOAD_EXTENSION_HINT}`;
+    } else if (extensionBuild === BUILD_ID) {
+      hint =
+        payload.code === "unknown_method"
+          ? `the extension and this bridge report the same build (${BUILD_ID}); this is not a stale-build symptom — the method really is unknown to the code that answered`
+          : `the extension and this bridge report the same build (${BUILD_ID}); the method is reserved-but-unbuilt in this build — not a stale-build symptom`;
+    } else {
+      older = olderSide(
+        { build: extensionBuild, builtAt: extensionBuiltAt },
+        { build: BUILD_ID, builtAt: BUILT_AT },
+      );
+      const extensionLabel = `${extensionBuild}${extensionBuiltAt === null ? "" : `, built ${extensionBuiltAt}`}`;
+      const bridgeLabel = `${BUILD_ID}${BUILT_AT === "unknown" ? "" : `, built ${BUILT_AT}`}`;
+      hint =
+        older === "extension"
+          ? `the running extension was built earlier (${extensionLabel}) than this bridge (${bridgeLabel}) — the extension is stale: ${RELOAD_EXTENSION_HINT}`
+          : older === "bridge"
+            ? `this bridge was built earlier (${bridgeLabel}) than the running extension (${extensionLabel}) — the bridge is stale: ${RESTART_BRIDGE_HINT}`
+            : `the running extension (${extensionLabel}) and this bridge (${bridgeLabel}) were not built together — one side is stale: ${RELOAD_EXTENSION_HINT}, and ${RESTART_BRIDGE_HINT} if the extension is not the older side`;
+    }
+
+    // Reserve the hint's space before truncating the original message: a cut
+    // diagnosis is the failure this whole path exists to prevent.
+    const separator = " — ";
+    const room = Math.max(0, MAX_MESSAGE_LENGTH - hint.length - separator.length);
+    return {
+      code: payload.code,
+      message: `${payload.message.slice(0, room)}${separator}${hint}`.slice(0, MAX_MESSAGE_LENGTH),
+      retryable: payload.retryable,
+      detail: {
+        ...detail,
+        hint,
+        extensionBuild,
+        extensionBuiltAt,
+        bridgeBuild: BUILD_ID,
+        bridgeBuiltAt: BUILT_AT,
+        olderSide: older,
+      },
+    };
+  }
+
+  /**
    * A forwarded command can fail two ways: the extension answered with an error
    * envelope (which carries a `payload`), or the bridge itself gave up (a
    * `timeout`, `invalid_response` or a dropped socket). Both must report their
@@ -425,7 +550,7 @@ export function createBridge(options: BridgeOptions): Bridge {
    */
   function commandFailure(error: unknown): ErrorPayload {
     const candidate = isPlainObject(error) ? error["payload"] : undefined;
-    if (isErrorPayload(candidate)) return candidate;
+    if (isErrorPayload(candidate)) return withStaleBuildDiagnosis(candidate);
     const message = error instanceof Error ? error.message : "";
     if (message === "timeout") return makeError("timeout", "the extension did not answer in time");
     if (message === "invalid_response") return makeError("internal", "the extension sent a malformed response");
@@ -515,8 +640,10 @@ export function createBridge(options: BridgeOptions): Bridge {
   }
 
   function healthView(includeExtensionHealth: boolean): Promise<BridgeHealth> {
+    const bridgeBuild: BuildView = { id: BUILD_ID, builtAt: BUILT_AT };
     const base: BridgeHealth = {
       ok: true,
+      build: { bridge: bridgeBuild, extension: null, mismatch: null },
       bridge: {
         name: BRIDGE_PRODUCT_NAME,
         version: BRIDGE_VERSION,
@@ -542,6 +669,18 @@ export function createBridge(options: BridgeOptions): Bridge {
       return Promise.resolve(base);
     }
     const hello = peer.hello;
+    // The extension's own stamp travels in its hello, and in every `health`
+    // payload; the hello one is what /health can report even when the worker is
+    // too busy to answer. Missing means the extension predates build stamping.
+    const extensionBuild: BuildView | null =
+      typeof hello.client.build === "string"
+        ? { id: hello.client.build, builtAt: hello.client.builtAt ?? null }
+        : null;
+    base.build = {
+      bridge: bridgeBuild,
+      extension: extensionBuild,
+      mismatch: extensionBuild === null ? null : extensionBuild.id !== BUILD_ID,
+    };
     const view: ExtensionHealthView = {
       connected: true,
       sessionId: peer.sessionId,
@@ -618,7 +757,13 @@ export function createBridge(options: BridgeOptions): Bridge {
       return;
     }
     if (url.pathname === "/version") {
-      writeJson(res, 200, { name: BRIDGE_PRODUCT_NAME, version: BRIDGE_VERSION, protocolVersion: PROTOCOL_VERSION });
+      writeJson(res, 200, {
+        name: BRIDGE_PRODUCT_NAME,
+        version: BRIDGE_VERSION,
+        protocolVersion: PROTOCOL_VERSION,
+        build: BUILD_ID,
+        builtAt: BUILT_AT,
+      });
       return;
     }
     writeJson(res, 404, { ok: false, error: makeError("not_found", `no route for ${url.pathname}`) });
@@ -671,7 +816,17 @@ export function createBridge(options: BridgeOptions): Bridge {
         }
         const envelope = parsed.value;
         if (!isV1Method(envelope.method)) {
-          reply(400, { ok: false, error: makeError("unknown_method", `unknown method: ${envelope.method}`) });
+          // A stale bridge rejected the method before the extension ever saw it, so
+          // there is no extension stamp to report — stamp the bridge's own build
+          // instead, or the original bug is reproduced with no evidence.
+          reply(400, {
+            ok: false,
+            error: makeError("unknown_method", `unknown method: ${envelope.method}`, false, {
+              bridgeBuild: BUILD_ID,
+              bridgeBuiltAt: BUILT_AT,
+              hint: `this bridge (${BUILD_ID}) does not know the method — if a newer client expects it, the bridge is stale: ${RESTART_BRIDGE_HINT}`,
+            }),
+          });
           return;
         }
         let params = envelope.params;
@@ -835,9 +990,26 @@ export function createBridge(options: BridgeOptions): Bridge {
             sessionId: peer.sessionId,
             extensionId: hello?.client.extensionId,
             extensionVersion: hello?.client.version,
+            extensionBuild: hello?.client.build ?? null,
             resumed: hello?.client.resumed ?? false,
             tokenFingerprint,
           });
+          // A build mismatch is the signature of a stale unpacked extension. It is
+          // logged only once the peer has proved the token (ADR 0005): before that,
+          // its claimed build is just something an impostor could say.
+          if (hello?.client.build !== undefined && hello.client.build !== BUILD_ID) {
+            logger.warn("extension build differs from bridge build: one side is stale", {
+              extensionBuild: hello.client.build,
+              extensionBuiltAt: hello.client.builtAt ?? null,
+              bridgeBuild: BUILD_ID,
+              bridgeBuiltAt: BUILT_AT,
+              olderSide: olderSide(
+                { build: hello.client.build, builtAt: hello.client.builtAt ?? null },
+                { build: BUILD_ID, builtAt: BUILT_AT },
+              ),
+              hint: `reload the unpacked extension and/or ${RESTART_BRIDGE_HINT}, whichever is older`,
+            });
+          }
         });
         return;
       }
@@ -910,7 +1082,15 @@ export function createBridge(options: BridgeOptions): Bridge {
       );
       return;
     }
-    peer.send(errorResponse(envelope.id, makeError("unknown_method", `unknown method: ${envelope.method}`)));
+    peer.send(
+      errorResponse(
+        envelope.id,
+        makeError("unknown_method", `unknown method: ${envelope.method}`, false, {
+          bridgeBuild: BUILD_ID,
+          bridgeBuiltAt: BUILT_AT,
+        }),
+      ),
+    );
   }
 
   return {

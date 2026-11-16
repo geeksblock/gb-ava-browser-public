@@ -298,6 +298,12 @@ export async function waitForNoDialog(port: number, token: string, tabId: number
 
 export interface HealthBody {
   ok: boolean;
+  /** Both sides' build identity; `mismatch` is the stale-extension signal. */
+  build: {
+    bridge: { id: string; builtAt: string };
+    extension: { id: string; builtAt: string | null } | null;
+    mismatch: boolean | null;
+  };
   bridge: {
     port: number;
     protocolVersion: number;

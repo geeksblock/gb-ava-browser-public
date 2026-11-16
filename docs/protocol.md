@@ -87,7 +87,7 @@ the port learns nothing and is never obeyed.
 Client → server, first frame:
 
 ```json
-{ "type": "hello", "protocolVersion": 2, "clientNonce": "<43 base64url chars>", "client": { "name": "gb-ava-extension", "version": "0.1.0", "extensionId": "…", "resumed": false } }
+{ "type": "hello", "protocolVersion": 2, "clientNonce": "<43 base64url chars>", "client": { "name": "gb-ava-extension", "version": "0.1.0", "extensionId": "…", "resumed": false, "build": "5c996186c457", "builtAt": "2026-11-06T16:43:22.000Z" } }
 ```
 
 Server → client, the bridge proves itself:
@@ -101,6 +101,13 @@ Client → server, only after the server proof verified:
 ```json
 { "type": "hello_auth", "clientProof": "HMAC(token, \"gb-ava/v2/ws-client\", clientNonce, serverNonce)" }
 ```
+
+`client.build` / `client.builtAt` are the commit and time the extension bundle was built from.
+They are optional only for an extension older than build stamping: a value that is present must be a
+short (≤200), non-empty, single-line string, and the bridge refuses one that is not rather than
+quoting it in a diagnostic later. The bridge's own build is reported by `GET /version` and `/health`, which is how a stale
+unpacked extension (code on disk newer than the service-worker script Chrome is executing) becomes a
+stated fact instead of a guess. See "Versioning".
 
 Server → client, accepted:
 
@@ -190,6 +197,11 @@ acceptance signal.
 ```json
 {
   "ok": true,
+  "build": {
+    "bridge": { "id": "5c996186c457", "builtAt": "2026-11-06T16:43:22.000Z" },
+    "extension": { "id": "5c996186c457", "builtAt": "2026-11-06T16:43:22.000Z" },
+    "mismatch": false
+  },
   "bridge": { "name": "gb-ava-bridge", "version": "0.1.0", "protocolVersion": 2, "host": "127.0.0.1", "port": 8765, "uptimeMs": 0, "tokenConfigured": true, "tokenFingerprint": "1a2b3c4d", "socketsSeen": 1, "uploadDirectory": "/Users/…/Ava Uploads" },
   "extension": {
     "connected": true,
@@ -199,6 +211,7 @@ acceptance signal.
       "worker": { "startedAt": "…", "uptimeMs": 0, "startsThisInstall": 1, "phase": "connected" },
       "keepalive": { "offscreenDocument": true, "alarmScheduled": true, "ticksReceived": 0, "reconnect": { "attempts": 0 } },
       "session": { "id": "…", "protocolVersion": 2 },
+      "extension": { "name": "Geeksblock Ava Browser Extension", "version": "0.1.0", "id": "…", "build": "5c996186c457", "builtAt": "2026-11-06T16:43:22.000Z" },
       "settings": { "evaluateEnabled": false, "evaluateEnabledBy": "human" },
       "lastError": null
     }
@@ -208,6 +221,23 @@ acceptance signal.
 
 When the extension is not connected the block is `{ "connected": false, "lastError": { … } }` — the
 bridge always answers its own health.
+
+`build` is the stale-build detector. `bridge` is the build of the bundle answering this
+request, `extension` is what the connected extension reported in its `hello` (null when none is
+connected, or when the extension predates build stamping), and `mismatch` is true only when both
+stamps are present and differ. `builtAt` is null if a side reports a build id without a timestamp,
+in which case the ordering is unknown and the diagnosis below names both builds instead of guessing.
+
+A mismatch means one side is running an older build, and either side can be the stale one:
+
+- **the extension**, because Chrome can keep serving the service-worker script it cached at the
+  extension's last load, even across a browser restart → reload the unpacked extension at
+  `chrome://extensions`; a Chrome restart does not refresh it;
+- **the bridge**, because the bridge is a long-lived process (a login service that keeps it running
+  survives rebuilds) and keeps the bundle it started with → restart the bridge: stop and start
+  `gb-ava-bridge serve`, or restart the login service that runs it.
+
+When both timestamps are present the reply names the older side.
 
 ### `settings.get`
 
@@ -533,6 +563,22 @@ guessing a reason in their place. A `needs_human` without a recognised reason ar
 `needs_human` carries `detail.reason` ∈ `webauthn`, `permission_prompt`, `javascript_dialog`,
 `file_picker`, `captcha`. A system sheet is reported, never dismissed by the extension.
 
+`unknown_method` and `not_implemented` from the extension carry `detail.extensionBuild` and
+`detail.extensionBuiltAt`. The bridge compares that stamp with its own build before answering:
+
+- **stamps differ** — the message and `detail.hint` say one side is stale, name both builds and,
+  when `builtAt` is parseable on both, which side is older. The extension is refreshed by reloading
+  it at `chrome://extensions`; the bridge is refreshed by restarting the process. `detail.olderSide`
+  is `"extension"`, `"bridge"` or `null` (order unknown).
+- **extension reports no stamp** — it predates build stamping; reload it.
+- **stamps are equal** — explicitly *not* called stale: `unknown_method` is a real code bug, and
+  `not_implemented` is genuinely reserved-but-unbuilt.
+
+A method outside protocol v1 is rejected by the bridge itself, before the extension sees it; that
+reply carries `detail.bridgeBuild`/`detail.bridgeBuiltAt` and a hint that a newer client should
+restart the bridge. Without these, a stale side reproduces the original failure with no evidence,
+which is exactly how it was misdiagnosed before.
+
 ## Versioning
 
 The protocol version is an integer in `hello` and in every `health` payload. A mismatch is refused
@@ -540,3 +586,16 @@ at the handshake (4002) rather than being tolerated; both sides ship from this r
 a stale unpacked extension, which the operator should reload. Version 2 (ADR 0005) replaced the token
 in `hello` with the mutual proof. A v1 extension meeting a v2 bridge gets `protocol_mismatch` (4002);
 a v2 extension meeting a v1 bridge cannot verify it and blocks as `bridge_unverified`.
+
+The protocol version alone cannot catch a stale build: every build of this repository reports version
+`0.1.0`, so an extension can be months behind and still negotiate the same protocol version. Build identity is a
+separate, finer signal: `hello` carries `client.build`/`client.builtAt`, `health` groups both
+sides under `build` with `mismatch`, and `GET /version` carries the bridge's own stamp flat
+(`build` + `builtAt`). The bridge logs a warning at handshake when the stamps differ, and turns an
+`unknown_method`/`not_implemented` from a differently-built extension into that diagnosis.
+
+After `npm run build` both artefacts on disk change, but neither running side refreshes itself: an
+unpacked extension keeps the service-worker script Chrome cached at its last load (a browser restart
+does not refresh it), and the bridge process keeps the bundle it was started with. Reload the
+extension at `chrome://extensions` **and** restart the bridge; then `/health` should report
+`mismatch: false`.

@@ -89,6 +89,27 @@ export function isAttached(tabId: number): boolean {
 }
 
 /**
+ * The tab's current URL, for a diagnostic. Never throws: a failure to answer must
+ * not replace the attach error the caller actually needs.
+ */
+async function currentTabUrl(tabId: number): Promise<string | null> {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    const url = tab.url ?? null;
+    // Same rule as tabs.list: the URL of a browser, extension or local-file page
+    // is never handed out, even in an error. The scheme alone still says why.
+    if (url === null) return null;
+    const lower = url.trim().toLowerCase();
+    const hidden = ["chrome:", "chrome-extension:", "chrome-untrusted:", "chrome-search:", "devtools:", "edge:", "view-source:", "file:"].find(
+      (scheme) => lower.startsWith(scheme),
+    );
+    return hidden === undefined ? url : `${hidden}//…`;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Whether a tab still exists. Used to tell "the tab is gone" (`not_found`, never
  * retry) from "the debugger lost it" (`debugger_unavailable`, retry) — the two
  * causes of a detach that the error text alone cannot distinguish.
@@ -147,11 +168,23 @@ async function attachNow(tabId: number): Promise<void> {
         );
       }
     }
+    // Do NOT claim a cause here. This branch catches every attach failure, and
+    // "Close DevTools on that tab and retry" was wrong for most of them — a
+    // chrome-extension refusal sent the caller looking for a DevTools window that
+    // was never open. Say only what is known, and record the evidence a
+    // future report needs: the verbatim Chrome message and the tab's current URL.
     throw commandError(
       "debugger_unavailable",
       `cannot attach to tab ${tabId}: ${message}`,
       true,
-      { tabId, hint: "Close DevTools on that tab and retry" },
+      {
+        tabId,
+        chromeMessage: message,
+        tabUrl: await currentTabUrl(tabId),
+        hint: /another debugger|already attached/i.test(message)
+          ? "Another debugger owns this tab. Close DevTools on it and retry."
+          : "The debugger could not attach to this tab. The tab URL is included; if it is not a normal page the tab cannot be debugged.",
+      },
     );
   }
 

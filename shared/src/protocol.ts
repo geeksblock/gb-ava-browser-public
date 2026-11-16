@@ -1087,6 +1087,15 @@ export interface ClientHello {
     extensionId?: string;
     /** True when this handshake follows a previous one in the same worker lifetime (MV3 resume). */
     resumed?: boolean;
+    /**
+     * The commit this extension bundle was built from. Optional because an
+     * extension built before build stamping existed omits it; the absence is
+     * itself diagnostic ("this extension predates build stamping"), never a
+     * reason to refuse the handshake.
+     */
+    build?: string;
+    /** When that build was made, ISO-8601. Same optionality rules as `build`. */
+    builtAt?: string;
   };
 }
 
@@ -1210,6 +1219,16 @@ export function isResponseEnvelope(input: unknown): input is ResponseEnvelope {
 
 const NONCE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
+/** A build label: short, non-empty and single-line, so it is safe to quote in a log line or error. */
+export const MAX_BUILD_LABEL_LENGTH = 200;
+
+export function isBuildLabel(value: unknown): value is string {
+  if (!validIdentifier(value, MAX_BUILD_LABEL_LENGTH)) return false;
+  // One line only: the label is quoted into log records and diagnostics, and a
+  // newline would break the "one record per line" property of the log.
+  return !/[\u0000-\u001f\u007f]/.test(value);
+}
+
 /**
  * Shape only: a hello from an older client (no nonce) still parses as far as its
  * version, so the bridge can answer `protocol_mismatch` instead of `malformed`.
@@ -1222,7 +1241,15 @@ export function isClientHello(input: unknown): input is ClientHello {
   }
   const client = input["client"];
   if (!isPlainObject(client)) return false;
-  return typeof client["name"] === "string" && typeof client["version"] === "string";
+  if (typeof client["name"] !== "string" || typeof client["version"] !== "string") return false;
+  // Optional build stamp: present means well-formed, absent means "an
+  // extension older than build stamping". A garbage value is refused rather
+  // than silently ignored — it is about to be quoted in diagnostics.
+  const build = client["build"];
+  const builtAt = client["builtAt"];
+  if (build !== undefined && !isBuildLabel(build)) return false;
+  if (builtAt !== undefined && !isBuildLabel(builtAt)) return false;
+  return true;
 }
 
 export function isServerChallenge(input: unknown): input is ServerChallenge {

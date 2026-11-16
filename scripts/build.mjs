@@ -13,6 +13,8 @@
  */
 
 import { build } from "esbuild";
+import { execFileSync } from "node:child_process";
+import { deriveBuildIdentity } from "./build-identity.mjs";
 import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,12 +28,42 @@ const mcpDist = join(root, "mcp", "dist");
 const rootPkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 const version = String(rootPkg.version ?? "0.0.0");
 
+/**
+ * The build identity every bundle carries.
+ *
+ * A rebuilt unpacked extension can keep serving the service-worker script Chrome
+ * cached at the last extension load, even after a browser restart, so the
+ * extension and bridge must be able to say which commit they are (any bundle
+ * importing `shared/src/build.ts` gets the stamp). The bridge compares its own
+ * build with the extension's and the runbooks tell the operator to reload on any
+ * difference; `-dirty` is deliberate — an uncommitted tree is not a build anyone
+ * can reproduce.
+ */
+function git(args) {
+  try {
+    return execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+  } catch {
+    return "";
+  }
+}
+
+const BUILD_AT = new Date().toISOString();
+const { id: BUILD_ID } = deriveBuildIdentity({
+  commit: git(["rev-parse", "--short=12", "HEAD"]) || "unknown",
+  dirty: git(["status", "--porcelain"]).length > 0,
+  builtAt: BUILD_AT,
+});
+
 const shared = {
   bundle: true,
   sourcemap: true,
   legalComments: "none",
   logLevel: "warning",
-  define: { "process.env.NODE_ENV": JSON.stringify(process.env.NODE_ENV ?? "production") },
+  define: {
+    "process.env.NODE_ENV": JSON.stringify(process.env.NODE_ENV ?? "production"),
+    __AVA_BUILD_ID__: JSON.stringify(BUILD_ID),
+    __AVA_BUILD_AT__: JSON.stringify(BUILD_AT),
+  },
   tsconfig: join(root, "tsconfig.json"),
 };
 
@@ -103,7 +135,6 @@ async function buildAdapter() {
   });
   // Declarations for the workspace consumer: esbuild bundles the JS but does not
   // emit types, and the package.json points at them.
-  const { execFileSync } = await import("node:child_process");
   execFileSync(process.execPath, [
     join(root, "node_modules", "typescript", "bin", "tsc"),
     "-p",
@@ -132,3 +163,5 @@ await buildExtension();
 await buildBridge();
 await buildAdapter();
 await buildMcp();
+
+process.stdout.write(`build id   -> ${BUILD_ID} (${BUILD_AT})\n`);

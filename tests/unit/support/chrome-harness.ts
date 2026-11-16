@@ -86,8 +86,11 @@ export async function completeHandshake(
   const serverNonce = newNonce();
   const serverProof = await makeProof(token, PROOF_LABELS.wsServer, [hello.clientNonce, serverNonce]);
   socket.fire("message", { data: JSON.stringify({ type: "hello_challenge", serverNonce, serverProof }) });
+  // Generous: under a loaded parallel run the worker's WebCrypto proof can take
+  // well over the idle-machine few milliseconds. A test expecting *no* answer
+  // (an impostor) pays this wait once.
   let auth: any = null;
-  for (let waited = 0; waited < 500 && auth === null; waited += 5) {
+  for (let waited = 0; waited < 2_000 && auth === null; waited += 5) {
     auth = socket.sent.find((frame) => frame?.type === "hello_auth") ?? null;
     if (auth === null) await new Promise((resolve) => setTimeout(resolve, 5));
   }

@@ -91,6 +91,14 @@ Rules:
   not in v1, `not_implemented` for a v1 method whose milestone has not landed. `page.evaluate` when
   the owner has not enabled it → `evaluate_disabled` (§5.1). The implemented subset, close codes and
   full error taxonomy live in `docs/protocol.md` and `shared/src/protocol.ts`.
+- The extension service worker and the bridge bundle carry a build identity (git commit + build time;
+  `scripts/build.mjs` injects it, and any module importing `shared/src/build.ts` gets the stamp), and
+  the extension reports it in `hello` and `health` while the bridge reports it in `/health` and
+  `GET /version`. A stale build on *either* side — code on disk newer than what is running,
+  whether the cached service-worker script Chrome is executing or the bundle a long-lived bridge
+  process started with — must be diagnosable from `health.build.mismatch` and from an
+  `unknown_method`/`not_implemented` carrying the extension's build, never guessable from a version
+  string.
 
 ### 5.1 `page.evaluate` — present, but off by default
 
@@ -122,6 +130,7 @@ Arbitrary JS is the most powerful and least predictable method, so it exists beh
 | Tab navigates away mid-command | Command fails with `tab_changed`; no retry |
 | Chrome window minimised / occluded | Reads and input must still work (this is the whole point); screenshots may be stale — verify in M2, and if stale, prefer `readAX` and say so |
 | Extension updated/reloaded | Bridge re-handshakes; in-flight commands fail loudly |
+| One side rebuilt but not reloaded/restarted (the extension keeps Chrome's cached service-worker script even across a browser restart; the bridge process keeps its old bundle) | The bridge reports `build.mismatch` in `/health`, logs a warning at handshake, and turns `unknown_method`/`not_implemented` from a differently-built side into a diagnosis that names both builds and the older side: reload the extension at `chrome://extensions` and/or restart the bridge. A browser restart is never presented as the fix |
 | Two sessions want the same tab | Refuse the second with `tab_busy`; never interleave input |
 
 ## 8. Testing

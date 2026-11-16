@@ -226,8 +226,10 @@ describe("the grace alarm", () => {
     }
     const reconnected = (globalThis as any).WebSocket.instances.at(-1);
     expect(reconnected).not.toBe(h.socket);
-    await completeHandshake(reconnected, { sessionId: "s2" });
-    await settle(30);
+    const { auth } = await completeHandshake(reconnected, { sessionId: "s2" });
+    expect(auth, "the worker proved the token to the returning bridge").not.toBeNull();
+    // The marker work after hello_ok is several awaits deep; wait for it, not a guess.
+    for (let waited = 0; waited < 2_000 && h.alarms.has("ava.ungroup-marker"); waited += 10) await settle(10);
     expect(h.alarms.has("ava.ungroup-marker")).toBe(false);
     expect(h.tabs[0].groupId).toBe(7);
   });

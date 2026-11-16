@@ -29,6 +29,32 @@ npm test           # unit tests (protocol, supervisor, backoff, redaction, bridg
 `npm run build` is also run automatically by the Playwright global setup, so the artefact under test
 is always the current source.
 
+### After a rebuild: reload the extension **and** restart the bridge
+
+`npm run build` writes both `extension/dist` and `bridge/dist`, but neither running side picks the new
+bundle up by itself:
+
+- **The extension** keeps executing the **service-worker script Chrome cached at its last load**.
+  Reload the unpacked extension at `chrome://extensions` (the circular-arrow button on its card).
+  Restarting Chrome does not refresh it — verified 2026-11-08, when a restart still served a
+  service-worker script cached six days earlier and an agent saw `unknown_method: tabs.create` for
+  code that had shipped. Bumping the manifest version does not refresh it either — verified
+  2026-11-11 with Chrome for Testing 157: changing `version` and the worker source, then restarting,
+  still ran the old worker.
+- **The bridge** is a long-lived process (often kept alive by a login service); it keeps the bundle it
+  was started with. After a rebuild that changes bridge code the *bridge* is the older side, and its
+  new code — including the stale-build diagnosis — is not running until it restarts: stop and start
+  `gb-ava-bridge serve`, or restart the login service that runs it.
+
+The build stamp makes all of this visible instead of guessable: `curl -s localhost:8765/health | jq .build`
+shows both sides' commit and `mismatch`, and when a timestamp is available the reply names the older
+side. `unknown_method`/`not_implemented` from a differently-built side is answered with that
+diagnosis. After reloading the extension and restarting the bridge, `mismatch` should be false.
+
+If you cannot click reload (headless automation), the extension's own options page can issue
+`chrome.runtime.reload()` — but that is a recovery step for the owner's machine, not part of the
+product's agent surface.
+
 ## 2. Start the bridge
 
 ```bash
@@ -203,6 +229,7 @@ memory.
 | Bridge log shows `rejected disallowed origin` | Something other than the extension connected (a web page, a proxy). Check `allowedExtensionIds`. |
 | Bridge log shows `rejected non-loopback upgrade` | The socket reached the machine from off-host — usually a port forward or a wrong bind. |
 | `health` says connected but `offscreenDocument` is `false` | Chrome refused the offscreen document (see the worker log). The alarm still fires every 30 s, so a 5-minute soak will look fine while the 20 s cadence is missing. Read the worker console before concluding it works. |
+| A method that exists in the code returns `unknown_method`/`not_implemented` | A stale build, not a missing handler. `curl -s localhost:8765/health | jq .build` gives both stamps and `mismatch`; the error's `detail.hint`/`detail.olderSide` names the older side. Fix that side: reload the extension at `chrome://extensions` (a Chrome restart does not help) or restart the bridge (a LaunchAgent process keeps its old bundle). Confirm `mismatch: false` afterwards. |
 | Extension disappears after a Chrome update | Reload the unpacked extension; check `chrome://extensions` for a permission error. |
 | Nothing obvious in the logs | `node scripts/debug-connect.mjs` launches Chromium with the extension, pairs it, prints the supervisor phase every 2 s and then the bridge's stderr and `/health`. It is the fastest way to see whether the client or the bridge is refusing. |
 

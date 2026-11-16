@@ -43,6 +43,12 @@ test("M0: extension connects, health answers from the bridge, keepalive is armed
 
   expect(health.bridge.protocolVersion).toBe(PROTOCOL_VERSION);
   expect(health.bridge.tokenConfigured).toBe(true);
+  // The real bundled extension and the real bundled bridge report the same
+  // build. If this ever fails, one artefact was rebuilt without reloading the
+  // extension — the defect class the build stamp exists to expose.
+  expect(health.build.bridge.id.length).toBeGreaterThan(0);
+  expect(health.build.extension?.id).toBe(health.build.bridge.id);
+  expect(health.build.mismatch).toBe(false);
   expect(health.extension.connected).toBe(true);
   if (health.extension.connected) {
     expect(health.extension.client.name).toBe("gb-ava-extension");
