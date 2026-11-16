@@ -403,7 +403,7 @@ nothing.
   `invalid_request`, with `detail.matchCount` and up to five described candidates in `detail.matches`
   (`tag`, `id`, `name`, `ariaLabel`, `text`, `visible`) — the metadata needed to build a selector that
   addresses one control. Taking the first match silently is what made a bare `select` hit a theme
-  picker instead of the contact picker on a real portal (#24). `page.click` and `page.type` keep
+  picker instead of the contact picker on a real portal. `page.click` and `page.type` keep
   first-match resolution: a repeated selector there is usually intended (one button per row), and
   refusing it would break ordinary flows.
 - `page.upload` attaches absolute file paths with `DOM.setFileInputFiles` — a real file-picker result,

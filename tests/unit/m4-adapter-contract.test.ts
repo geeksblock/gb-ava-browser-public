@@ -1,7 +1,7 @@
 /**
  * The adapter ↔ protocol contract, checked as a whole.
  *
- * #26 shipped because `browser_find_tab` sent `urlIncludes` where `tabs.query` takes
+ * A bug once shipped because `browser_find_tab` sent `urlIncludes` where `tabs.query` takes
  * `urlPattern`. The parser was correct and the adapter was wrong, and nothing compared
  * the two. This file does that comparison for **every** adapter tool: it drives each
  * `browser_*` function through a recording client and runs the parameters the adapter
@@ -122,7 +122,7 @@ const CASES: Case[] = [
   {
     tool: "browser_upload",
     // A REAL file: browser_upload now stats the path in Node before calling the
-    // bridge (#33 item 7), so a fictional path is refused before reaching the wire.
+    // bridge, so a fictional path is refused before reaching the wire.
     invoke: (c) => adapter.browser_upload(c, { tabId: 1, nodeId: 5, files: [UPLOAD_FIXTURE] }),
     parser: "parseUploadParams",
   },

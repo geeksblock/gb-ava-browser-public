@@ -1,7 +1,7 @@
 /**
  * Every protocol parser, driven through its allowlist.
  *
- * This file exists because of #26: `browser_find_tab` sent `urlIncludes` to
+ * This file exists because of a past bug: `browser_find_tab` sent `urlIncludes` to
  * `tabs.query`, whose allowlist takes `urlPattern`, and the mismatch only showed up
  * against a live bridge. The parser was right; nothing tested that the *callers*
  * agreed with it.
@@ -22,7 +22,7 @@ type Parser = (params: unknown) => { ok: boolean; value?: unknown; error?: { mes
 /**
  * A valid call for each parser using **every documented parameter**, optional ones
  * included. Optional keys must be present here or the suite cannot see an allowlist
- * that drops one — which is how #26 shipped: `limit` was optional on `page.getText`,
+ * that drops one — which is how that bug shipped: `limit` was optional on `page.getText`,
  * so nothing passed it and nothing noticed the allowlist.
  */
 const VALID: Record<string, Record<string, unknown>> = {

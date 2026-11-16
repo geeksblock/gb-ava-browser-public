@@ -1,5 +1,5 @@
 /**
- * #33 item 6 — a closed tab must not be reported as a retryable debugger problem.
+ * a closed tab must not be reported as a retryable debugger problem.
  *
  * `debugger_unavailable` is `retryable: true`. When a tab closes, Chrome reports it
  * as a detach, which used to land on that code — so a caller branching on

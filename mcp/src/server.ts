@@ -91,7 +91,7 @@ export async function handleMessage(deps: ServerDeps, raw: string): Promise<Repl
     if (tool === undefined) return fail(id, -32602, `unknown tool: ${name}`);
     // Hold the host to the schema we advertise. Without this, a `null` for a string
     // parameter reaches `String(args[...])` and is sent to the bridge as the literal
-    // "null" — a value the caller never meant (#33 item 4). The bridge would refuse
+    // "null" — a value the caller never meant. The bridge would refuse
     // it, but as `invalid_request` for a well-formed tool call, which misplaces the
     // blame.
     const schemaProblem = checkAgainstSchema(tool.inputSchema, args);

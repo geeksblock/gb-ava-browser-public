@@ -1,7 +1,7 @@
 # Runbook — local development of the Ava browser path
 
-Audience: whoever is working on this repo (Elias, Ava). Everything here runs on one Mac; nothing
-leaves the machine except `npm install` / `npx playwright install`.
+Audience: contributors. Everything here runs on one machine; nothing
+leaves it except `npm install` / `npx playwright install`.
 
 ## 0. Prerequisites
 
@@ -9,25 +9,13 @@ leaves the machine except `npm install` / `npx playwright install`.
 - Chrome (stable) for the manual load; Playwright's bundled Chromium for the automated tests.
 - `npm install` at the repo root, then `npx playwright install chromium` once.
 
-## 0a. Installing it on this Mac (what is actually running)
+## 0a. Running it day to day
 
-The bridge runs as a per-user LaunchAgent, so it survives a restart and a logout:
-
-- label `com.geeksblock.ava-bridge`, plist in `~/Library/LaunchAgents/`, logs in
-  `~/Library/Logs/gb-ava-bridge.log`
-- restart it with `launchctl kickstart -k gui/$(id -u)/com.geeksblock.ava-bridge`
-- the per-install token is `~/.config/gb-ava-bridge/token` (0600); print it with
-  `node bridge/dist/cli.js token`
-
-The extension is loaded into the real Chrome profile from a symlink,
-`~/gb-ava-extension` → `extension/dist`, so `npm run build` refreshes the code and
-`chrome://extensions` → reload picks it up. Its id is stable
-(`dkjanfkoljfnbhjngoeabopanmeoonio`) because it derives from that path; deleting the
-symlink breaks the extension in Chrome. It is paired already — the options page
-shows a token fingerprint, never the token.
-
-The MCP entry lives in `~/.config/opencode/opencode.jsonc` as a local server named
-`gb-ava-browser`; a new chat session is needed before its tools appear.
+Run the bridge as a per-user login service (a macOS LaunchAgent, a systemd user unit, or similar)
+so it survives a restart. The per-install token lives in `~/.config/gb-ava-bridge/token` (0600);
+print it with `node bridge/dist/cli.js token` and paste it into the extension's options page, which
+then shows only a fingerprint. Load the unpacked `extension/dist` from a stable path so the
+extension id does not change between builds.
 
 ## 1. Build
 

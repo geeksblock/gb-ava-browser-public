@@ -18,7 +18,7 @@ import {
 } from "./helpers.js";
 
 /**
- * M3 acceptance (issue #5): act on a tab that is not in front. The issue's own
+ * M3 acceptance: act on a tab that is not in front. The milestone's own
  * acceptance is a real Microsoft Entra sign-in with a Temporary Access Pass; the
  * suite reproduces that shape (identifier step, code step, redirect) on the
  * fixture site so it can run offline, and the same flow against a real tenant is
@@ -214,7 +214,7 @@ test("M3: select, upload, scroll and key act without focus", async () => {
 });
 
 test("M3: a click lands on a background tab and says which route ran", async () => {
-  // Issue #16: every mouse-input method timed out on a tab that had been in the
+  // every mouse-input method timed out on a tab that had been in the
   // background — Chrome does not ack Input.dispatchMouseEvent for a renderer it is
   // not compositing — while keyboard input to the same tab worked. A click that
   // answers `ok` is not the assertion; the page reacting is.
@@ -252,7 +252,7 @@ test("M3: a click on the tab in front still uses real browser input", async () =
 });
 
 test("M3: page.scroll moves the page with no target and a nested scroller by node", async () => {
-  // Issue #19: scroll needed a target, and the two routes it had were a wheel
+  // scroll needed a target, and the two routes it had were a wheel
   // event (dead on a background tab) and keyboard paging (focus-dependent).
   const tabId = await backgroundTab("/scroller");
 

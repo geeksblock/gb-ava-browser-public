@@ -1,5 +1,5 @@
 /**
- * #33's fixable items, each pinned by the behaviour the issue described.
+ * Schema and storage gaps, each pinned by the behaviour that was reported.
  *
  *   item 2 — `page.waitFor` with an invalid selector reported `timeout`
  *   item 3 — `browser_session_start`'s schema forbade what its text described
@@ -16,7 +16,7 @@ import { loadMarkerState } from "../../extension/src/lib/marker-store.js";
 /* item 4 — the advertised schema is enforced                        */
 /* ---------------------------------------------------------------- */
 
-describe("the MCP server holds a caller to the schema it advertises (#33 item 4)", () => {
+describe("the MCP server holds a caller to the schema it advertises", () => {
   const waitTool = MCP_TOOLS.find((tool) => tool.name === "browser_wait");
 
   it("has a browser_wait tool to check against", () => {
@@ -81,7 +81,7 @@ describe("the MCP server holds a caller to the schema it advertises (#33 item 4)
 /* item 3 — the schema no longer contradicts the description         */
 /* ---------------------------------------------------------------- */
 
-describe("browser_session_start's schema matches what it says (#33 item 3)", () => {
+describe("browser_session_start's schema matches what it says", () => {
   const start = MCP_TOOLS.find((tool) => tool.name === "browser_session_start")!;
 
   it("does not forbid the empty array its description allows", () => {
@@ -105,7 +105,7 @@ describe("browser_session_start's schema matches what it says (#33 item 3)", () 
 /* item 5 — stored marker state is not trusted                       */
 /* ---------------------------------------------------------------- */
 
-describe("loadMarkerState refuses corrupt storage (#33 item 5)", () => {
+describe("loadMarkerState refuses corrupt storage", () => {
   function withStored(stored: unknown): void {
     (globalThis as any).chrome = {
       storage: {

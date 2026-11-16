@@ -170,7 +170,7 @@ test("GAP: tabs.query matches url and title case-insensitively as substrings, an
 });
 
 /* ------------------------------------------------------------------ */
-// #33 item 2: an invalid selector must be refused, not waited out.
+// an invalid selector must be refused, not waited out.
 test("GAP: page.waitFor refuses a selector that is not valid CSS, rather than timing out", async () => {
   const tabId = await backgroundTab("/form");
 

@@ -22,7 +22,7 @@ export async function loadMarkerState(): Promise<MarkerState> {
     // Storage is not trust. A corrupt or hand-edited record must degrade to "nothing
     // is marked", never hand the worker a NaN tab id or a group it does not have:
     // the marker drives real chrome.tabs.group/ungroup calls, so a bad id there is
-    // a bad command, not a cosmetic glitch (#33 item 5).
+    // a bad command, not a cosmetic glitch.
     const tabIds = Array.isArray(record["tabIds"])
       ? record["tabIds"].filter(
           (id): id is number => typeof id === "number" && Number.isSafeInteger(id) && id >= 0,
@@ -38,7 +38,7 @@ export async function loadMarkerState(): Promise<MarkerState> {
       tabIds,
       sessionId: typeof record["sessionId"] === "string" ? record["sessionId"] : null,
       // A groupId without `grouped` is not a marker: the reducer would offer a group
-      // the human never saw, which is the bug class #29 closed.
+      // the human never saw, which is a bug class fixed earlier.
       grouped: grouped && groupId !== null,
       groupId,
       ungroupArmed: record["ungroupArmed"] === true,

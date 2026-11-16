@@ -7,9 +7,9 @@
 
 ## Context
 
-Ava needs to operate web UIs that are already signed in as the owner: client Microsoft 365 / Entra tenants, Google Workspace tenants, internal portals. The requirement that makes this hard is **not** capability, it is discretion: the owner is working on the same Mac, and an agent that raises windows or grabs focus is unusable for slow tasks.
+Ava needs to operate web UIs that are already signed in as the owner: signed-in web admin consoles and portals. The requirement that makes this hard is **not** capability, it is discretion: the owner is working on the same Mac, and an agent that raises windows or grabs focus is unusable for slow tasks.
 
-Current state, measured 2026-10-29 on this MacBook:
+Current state, measured 2026-10-29 on a development Mac:
 
 - **Remote-debugging port.** Cua's `browser_*` tools attach over CDP, but `browser_prepare` refused with: Chrome must come to the front for its "Allow remote debugging?" prompt whenever a new DevTools connection opens. Attaching therefore steals focus. It also only ever reaches the separate Chrome instance that was launched with the flag, whose profile is empty of the owner's sessions.
 - **`chrome-devtools` MCP.** Works, but attached to a separate instance with its own profile — automatable, never the owner's logins.
@@ -56,4 +56,4 @@ Build a Chrome MV3 extension (Geeksblock Ava Browser Extension) that the local C
 
 ## Notes
 
-- Claude for Chrome (v1.0.102, inspected in this profile) holds exactly this permission set — `debugger`, `tabGroups`, `tabs`, `scripting`, `offscreen`, `alarms`, `nativeMessaging` — and marks its tabs with `chrome.tabGroups.update(..., { color: "orange", title: "Claude" })`. The architecture is proven in production by two vendors; this ADR adopts it deliberately rather than inventing a variant.
+- Claude for Chrome (v1.0.102) holds exactly this permission set — `debugger`, `tabGroups`, `tabs`, `scripting`, `offscreen`, `alarms`, `nativeMessaging` — and marks its tabs with `chrome.tabGroups.update(..., { color: "orange", title: "Claude" })`. The architecture is proven in production by two vendors; this ADR adopts it deliberately rather than inventing a variant.

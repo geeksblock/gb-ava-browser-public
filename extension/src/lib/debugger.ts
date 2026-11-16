@@ -251,7 +251,7 @@ export async function send<T>(tabId: number, method: string, params?: Record<str
     // A session that died under us. Two different causes land here — the tab was
     // closed, or DevTools attached — and they must not be reported the same way:
     // `debugger_unavailable` is retryable, so a caller told that for a tab that no
-    // longer exists retries forever (#33 item 6). Ask Chrome whether the tab is
+    // longer exists retries forever. Ask Chrome whether the tab is
     // still there rather than guessing from the message text.
     if (/detached|not attached|closed/i.test(message)) {
       sessions.delete(tabId);

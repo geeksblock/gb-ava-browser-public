@@ -1,15 +1,15 @@
 # Implementation Plan — Geeksblock Ava Browser Extension
 
-Owner: Elias Hernandez (Geeksblock LLC) · Authorised 2026-10-29 · Written by Ava
-Repo: `geeksblock/gb-ava-browser` · Product name: **Geeksblock Ava Browser Extension** · Tab group label: **Ava**, colour **red**
+Owner: Geeksblock LLC
+Repo: `geeksblock/gb-ava-browser-public` · Product name: **Geeksblock Ava Browser Extension** · Tab group label: **Ava**, colour **red**
 
 ---
 
 ## 1. Outcome
 
-Ava can operate a tab in Elias's own Chrome profile, in the background, while he keeps working in another window — with no "Allow remote debugging?" prompt, no window raising, and no focus theft.
+Ava can operate a tab in the owner's own Chrome profile, in the background, while they keep working in another window — with no "Allow remote debugging?" prompt, no window raising, and no focus theft.
 
-**Definition of done (acceptance):** with Chrome behind a full-screen app, Elias asks Ava to check a client's Microsoft Entra configuration. Ava groups the tab red/`Ava`, navigates, signs in using a TAP, reads the blade content, reports it, and ungroups the tab — while Elias's front window never changes and his pointer is not moved.
+**Definition of done (acceptance):** with Chrome behind a full-screen app, the owner asks Ava to read a page in a signed-in admin console. Ava groups the tab red/`Ava`, navigates, signs in, reads the page content, reports it, and ungroups the tab — while the owner's front window never changes and their pointer is not moved.
 
 ## 2. Why this exists
 
@@ -148,7 +148,7 @@ Arbitrary JS is the most powerful and least predictable method, so it exists beh
 2. **`debugger` infobar** is visible on every attached tab. Accepted: honest, non-blocking.
 3. **MV3 keepalive** is the most likely source of flaky "agent went deaf" reports. Build the state machine first, test it first.
 4. **Enterprise rollout**: force-install via `ExtensionSettings` policy works for managed Chrome; unmanaged machines still require a click, so "production-ready" for a nontechnical user depends on policy deployment.
-5. **Trust surface**: `<all_urls>` + `debugger` means the extension can read any logged-in page. Same trade-off already accepted for Claude and Codex; must be stated in the privacy note.
+5. **Trust surface**: `<all_urls>` + `debugger` means the extension can read any logged-in page. Same trade-off as other browser-agent extensions; must be stated in the privacy note.
 
 ## 11. Prior art (checked 2026-10-30 — do not re-invent this)
 
@@ -170,7 +170,7 @@ Arbitrary JS is the most powerful and least predictable method, so it exists beh
 
 ## 12. Decisions taken (owner, 2026-10-30 — no longer open)
 
-1. **Repo visibility:** private. Publish later if there is a reason.
+1. **Repo visibility:** public since 0.1.0.
 2. **Cua integration:** a single alternate backend behind the existing `browser_*` tools, not a separate tool family. Nothing new for the agent side to learn.
 3. **`page.evaluate`:** ships in v1 **behind a human-controlled options toggle, off by default** (§5.1). The agent can read the setting, never change it.
 4. **Browser support:** Chrome first; Edge/Brave validated in M5 (same engine, expected to work unmodified).

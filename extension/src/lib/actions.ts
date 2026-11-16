@@ -421,7 +421,7 @@ async function boxForSelector(
   try {
     // Count before resolving. `DOM.querySelector` returns only the first match, so
     // without this a selector matching several controls silently takes whichever
-    // Chrome lists first — the theme picker instead of the contact picker (#24).
+    // Chrome lists first — the theme picker instead of the contact picker.
     if (options.requireUnique === true) {
       const all = await send<{ nodeIds?: number[] }>(tabId, "DOM.querySelectorAll", { nodeId: root, selector });
       const count = (all.nodeIds ?? []).length;
@@ -935,7 +935,7 @@ export async function scrollCommand(params: ScrollParams): Promise<JsonObject> {
  *
  * `requireUnique` is on: a selector matching several controls is refused with the
  * candidates described, rather than silently taking whichever Chrome lists first
- * (#24 — a bare "select" hit the theme picker instead of the contact picker).
+ * (a bare "select" once hit the theme picker instead of the contact picker).
  */
 export async function selectCommand(params: SelectParams): Promise<JsonObject> {
   const { tabId, target, value } = params;
@@ -951,7 +951,7 @@ export async function selectCommand(params: SelectParams): Promise<JsonObject> {
     functionDeclaration: `function () {
       const wanted = ${JSON.stringify(value)};
       if (!(this instanceof HTMLSelectElement)) return { ok: false, reason: "not a select element" };
-      // Identify the control this resolved to (#24). A bare selector like "select"
+      // Identify the control this resolved to. A bare selector like "select"
       // matches the FIRST select on the page, which may be an unrelated control
       // near the top; without the identity, a wrong match is only inferable from
       // the option list. Reporting it makes the mistake visible in the result.
@@ -1209,7 +1209,7 @@ export async function waitForCommand(params: WaitForParams): Promise<JsonObject>
               // An invalid selector throws here rather than answering false. Swallowing
               // that into the wait loop reports "never matched" for a selector that
               // could never match, so a caller branching on `code` cannot tell a
-              // typo from a slow page (#33 item 2).
+              // typo from a slow page.
               try {
                 selector = document.querySelector(wantedSelector) !== null;
               } catch {

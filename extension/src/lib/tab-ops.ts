@@ -169,7 +169,7 @@ async function waitForTabToLand(
 }
 
 /**
- * Open a new tab on `url` (#23).
+ * Open a new tab on `url`.
  *
  * The point of this method is to stay off the user's screen. `background`
  * defaults to true, and a background tab is created with `active: false` so
@@ -209,7 +209,7 @@ export async function createCommand(params: CreateParams): Promise<JsonObject> {
  * must stay `red`/`Ava` because that is what the docs and the tests promise).
  *
  * `params.groupId` is the id the *caller* named: it is honoured or refused, never
- * swapped for another group (#32). A group the marker remembers itself arrives through
+ * swapped for another group. A group the marker remembers itself arrives through
  * `rememberedGroupId`, which may recover, because a stale marker id is the agent's own
  * bookkeeping rather than a caller's request.
  */

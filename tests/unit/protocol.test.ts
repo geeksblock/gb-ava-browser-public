@@ -57,7 +57,7 @@ describe("method registry", () => {
     // silent success; a name outside v1 is `unknown_method`.
     expect(isKnownMethod("page.evaluate")).toBe(true);
     expect(isKnownMethod("tabs.move")).toBe(false);
-    // #18: the tab that vanished mid-sequence is visible through these two.
+    // the tab that vanished mid-sequence is visible through these two.
     expect(isKnownMethod("tabs.activate")).toBe(true);
     expect(isKnownMethod("session.status")).toBe(true);
     expect(isKnownMethod("")).toBe(false);

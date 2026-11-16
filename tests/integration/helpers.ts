@@ -201,7 +201,7 @@ export async function startFixtureSite(): Promise<FixtureSite> {
 <h1 id=heading>scroller</h1>
 <div id=inner style="height:120px;overflow:auto;border:1px solid #000"><div style="height:2000px">inner content</div></div>
 <div id=tall style="height:4000px">below the fold</div>`;
-  // A page with the two shapes #24 and #25 need: a decoy control FIRST (so a bare
+  // A page with the two shapes the control tests need: a decoy control FIRST (so a bare
   // selector resolves to the wrong element), and real checkboxes so a tick can be
   // verified from the tree.
   const controls = `<!doctype html><meta charset=utf-8><title>fixture-controls</title>

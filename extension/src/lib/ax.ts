@@ -71,7 +71,7 @@ const CHECKABLE_ROLES = new Set(["checkbox", "radio", "switch", "menuitemcheckbo
  * Chrome reports this as the `checked` property for most controls; a native
  * `<input type=checkbox>` wrapped in a label surfaces it the same way. Reading it
  * here is what lets an agent verify a tick from the tree alone instead of needing
- * `page.evaluate` (#25).
+ * `page.evaluate`.
  */
 function checkedState(node: RawAxNode, role: string): boolean | null {
   if (!CHECKABLE_ROLES.has(role)) return null;

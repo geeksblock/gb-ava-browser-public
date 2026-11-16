@@ -212,7 +212,7 @@ describe("tabs.group", () => {
     expect(h.groups.get(first.groupId)).toMatchObject({ color: "red", title: "Ava", collapsed: false });
   });
 
-  // #32: a dead id the *marker* remembers recovers, because that is the agent's own
+  // a dead id the *marker* remembers recovers, because that is the agent's own
   // bookkeeping going stale. A dead id the *caller* named does not — see
   // tests/unit/tab-ops-group-id.test.ts, which pins the not_found answer.
   it("falls back to a fresh group exactly once when the remembered id is dead", async () => {

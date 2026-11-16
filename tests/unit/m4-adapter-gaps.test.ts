@@ -1,5 +1,5 @@
 /**
- * The three #33 items that were left unfixed, now authorised and closed.
+ * Adapter gaps: the read-page caps and upload path checks.
  *
  *   item 1 — `browser_read_page`'s `limit` capped the tree but not the text
  *   item 7 — `page.upload` answered ok for a path that does not exist
@@ -44,7 +44,7 @@ const readReply = (method: string): unknown =>
 /* item 1 — the text cap is its own, controllable thing              */
 /* ---------------------------------------------------------------- */
 
-describe("browser_read_page separates the node cap from the text cap (#33 item 1)", () => {
+describe("browser_read_page separates the node cap from the text cap", () => {
   it("sends page.getText no limit when none was asked for", async () => {
     const { context, calls } = recordingContext(readReply);
     await browser_read_page(context, { tabId: 1 });
@@ -84,7 +84,7 @@ describe("browser_read_page separates the node cap from the text cap (#33 item 1
 /* item 7 — a path that does not exist is refused before the bridge  */
 /* ---------------------------------------------------------------- */
 
-describe("browser_upload checks the paths before calling the bridge (#33 item 7)", () => {
+describe("browser_upload checks the paths before calling the bridge", () => {
   const dir = mkdtempSync(join(tmpdir(), "gb-ava-upload-"));
   const realFile = join(dir, "real.txt");
   writeFileSync(realFile, "content\n");

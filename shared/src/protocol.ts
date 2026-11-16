@@ -415,7 +415,7 @@ export function parseNavigateParams(params: JsonObject | undefined): Validation<
  * `tabs.create` — open a page the user has not already opened.
  *
  * Exists so a flow that needs a new page does not have to leave the bridge for
- * AppleScript, which raises Chrome and gives up the no-focus-theft guarantee (#23).
+ * AppleScript, which raises Chrome and gives up the no-focus-theft guarantee.
  * `background` defaults to **true**: the whole point is that opening a tab must not
  * pull the window in front of the human. A caller that wants the tab focused asks
  * for it explicitly.
@@ -548,7 +548,7 @@ export interface AxNode {
    *
    * Tri-state on purpose: `false` means "a control that is not checked" and `null`
    * means "not a checkable control at all". Reporting `false` for a plain button
-   * would invite a caller to read a state the node cannot have (#25).
+   * would invite a caller to read a state the node cannot have.
    */
   checked: boolean | null;
   /** Bounds in CSS pixels, or null when the node has no box. */

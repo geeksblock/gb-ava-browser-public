@@ -12,7 +12,7 @@ import {
 } from "./helpers.js";
 
 /**
- * M0 acceptance gate, driven entirely through the bridge (issue #3):
+ * M0 acceptance gate, driven entirely through the bridge:
  *
  *   idle for five minutes with no commands, then `health` still answers, the
  *   session id is unchanged, and the worker never restarted.

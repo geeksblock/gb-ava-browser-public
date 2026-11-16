@@ -1,5 +1,5 @@
 /**
- * `tabs.create` (#23).
+ * `tabs.create`.
  *
  * The method exists so a flow that needs a page the user has not already opened does
  * not have to leave the bridge for AppleScript, which raises Chrome. The tests below

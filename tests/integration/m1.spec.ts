@@ -13,7 +13,7 @@ import {
 } from "./helpers.js";
 
 /**
- * M1 acceptance (issue #1): `tabs.*` works against real Chrome, the marker group
+ * M1 acceptance: `tabs.*` works against real Chrome, the marker group
  * is red and titled `Ava`, ungrouping leaves no residue, and nothing depends on
  * group membership to control a tab.
  *
@@ -355,7 +355,7 @@ test("M1: a command naming a tab that does not exist fails closed", async () => 
 });
 
 test("M1: tabs.activate selects the tab without raising the window, and session.status reports a tab that vanished", async () => {
-  // #18: there was no way to select a tab, so a caller could not move a tab into
+  // there was no way to select a tab, so a caller could not move a tab into
   // the only state some sites (and the other tools on this Chrome) act on — and a
   // tab the owner closed only surfaced as `not_found` on the next command.
   const page = await extension.context.newPage();

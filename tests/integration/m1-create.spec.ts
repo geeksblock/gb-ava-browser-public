@@ -12,7 +12,7 @@ import {
 } from "./helpers.js";
 
 /**
- * `tabs.create` (#23).
+ * `tabs.create`.
  *
  * The method exists so a flow that needs a page the user has not opened can stay
  * on the bridge. The guarantee under test is the product's central one: the new tab
@@ -65,7 +65,7 @@ async function listTabs(): Promise<TabRow[]> {
   return reply.result?.tabs ?? [];
 }
 
-test("CREATE: opens a page nobody has opened before, without focusing it (#23)", async () => {
+test("CREATE: opens a page nobody has opened before, without focusing it", async () => {
   const target = site.url("/form");
 
   const reply = (await bridgeCall(bridge.port, bridge.token, "tabs.create", { url: target })) as unknown as CreateReply;

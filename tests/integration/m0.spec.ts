@@ -12,7 +12,7 @@ import {
 } from "./helpers.js";
 
 /**
- * M0 acceptance (issue #3): the extension connects to the real bridge, `health`
+ * M0 acceptance: the extension connects to the real bridge, `health`
  * answers from the bridge, the keepalive is armed, the token never appears in a
  * log, and the human-owned `page.evaluate` switch is off until the owner flips it.
  *

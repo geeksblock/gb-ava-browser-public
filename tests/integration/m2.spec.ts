@@ -14,7 +14,7 @@ import {
 } from "./helpers.js";
 
 /**
- * M2 acceptance (issue #4): read a tab that is **not** in front, with Chrome
+ * M2 acceptance: read a tab that is **not** in front, with Chrome
  * occluded. This is the product thesis, so the tests put another tab in front and
  * then read the background one through the bridge.
  */
@@ -148,7 +148,7 @@ test("M2: getText returns the rendered text of a background tab without the debu
 });
 
 test("M2: reads see content inside an iframe, and say which frames were read", async () => {
-  // Issue #17: Microsoft admin portals render every blade in an iframe. readAX and
+  // Microsoft admin portals render every blade in an iframe. readAX and
   // getText returned only the outer shell — silently, with `truncated: false` — so
   // the only route to the answer was a screenshot. The second origin makes the
   // child frame cross-origin, which is the out-of-process case that defeated the

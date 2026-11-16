@@ -133,7 +133,7 @@ export async function browser_activate_tab(
 
 /**
  * Open a tab. `background` defaults to true so this never pulls Chrome in front of
- * the human (#23); pass `background: false` only when the caller wants the tab
+ * the human; pass `background: false` only when the caller wants the tab
  * focused, which is the opposite of what the product promises by default.
  */
 export async function browser_create_tab(
@@ -168,7 +168,7 @@ export async function browser_session_end(context: ToolContext): Promise<unknown
  * the text. `limit` is the number of AX **nodes** (1..4000); `textLimit` is
  * **characters** of rendered text (up to 200,000, default 20,000). Passing `limit`
  * alone used to widen the tree while the text stayed at the protocol default
- * (#33 item 1) — a caller asking for "a bigger read" got half of one.
+ * — a caller asking for "a bigger read" got half of one.
  */
 export async function browser_read_page(
   context: ToolContext,
@@ -323,7 +323,7 @@ export async function browser_select(context: ToolContext, params: ElementTarget
  * The paths are checked here, before the bridge is asked, because this layer runs in
  * Node on the same machine as the files and the extension does not: Chrome answers
  * `ok` for a path that does not exist by manufacturing a zero-byte `File` named after
- * it (#33 item 7). Refusing up front is the only place the real answer is available.
+ * it. Refusing up front is the only place the real answer is available.
  *
  * Absolute is required by the protocol (a relative path would resolve against
  * Chrome's cwd, not the caller's intent), so a relative path is refused with that

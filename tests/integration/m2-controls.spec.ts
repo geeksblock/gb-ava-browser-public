@@ -12,14 +12,14 @@ import {
 } from "./helpers.js";
 
 /**
- * #24 and #25, both found on a real support portal.
+ * two control-handling gaps, both found on a real support portal.
  *
- * #24 — `page.select` with a bare selector like `"select"` takes the FIRST match on
+ * `page.select` with a bare selector like `"select"` takes the FIRST match on
  * the page, which may be an unrelated control. The fix reports what was matched so a
  * wrong first choice is visible in the result, instead of only inferable from an
  * option list.
  *
- * #25 — `page.readAX` reported no checked state for checkboxes, so verifying a tick
+ * `page.readAX` reported no checked state for checkboxes, so verifying a tick
  * needed `page.evaluate`. The tree now carries a tri-state `checked`.
  */
 
@@ -78,7 +78,7 @@ function checkbox(nodes: AxNode[], name: string): AxNode | undefined {
   return nodes.find((node) => node.role === "checkbox" && node.name.includes(name));
 }
 
-test("#25: page.readAX reports a checkbox's checked state", async () => {
+test("page.readAX reports a checkbox's checked state", async () => {
   const tabId = await openTab("/controls");
   const nodes = await readTree(tabId);
 
@@ -93,7 +93,7 @@ test("#25: page.readAX reports a checkbox's checked state", async () => {
   expect(fresh!.checked).toBe(true);
 });
 
-test("#25: a ticked box is visible in the tree, without page.evaluate", async () => {
+test("a ticked box is visible in the tree, without page.evaluate", async () => {
   const tabId = await openTab("/controls");
   const before = await readTree(tabId);
   const target = checkbox(before, "All tickets");
@@ -107,11 +107,11 @@ test("#25: a ticked box is visible in the tree, without page.evaluate", async ()
 
   const after = await readTree(tabId);
   const ticked = checkbox(after, "All tickets");
-  // The whole point of #25: the state change is readable from the tree alone.
+  // The whole point: the state change is readable from the tree alone.
   expect(ticked!.checked).toBe(true);
 });
 
-test("#25: a non-checkable node reports checked as null, not false", async () => {
+test("a non-checkable node reports checked as null, not false", async () => {
   const tabId = await openTab("/controls");
   const nodes = await readTree(tabId);
 
@@ -124,7 +124,7 @@ test("#25: a non-checkable node reports checked as null, not false", async () =>
   if (combobox) expect(combobox.checked).toBeNull();
 });
 
-test("#24: an ambiguous selector is refused, with candidates the agent can act on", async () => {
+test("an ambiguous selector is refused, with candidates the agent can act on", async () => {
   const tabId = await openTab("/controls");
 
   // A bare `select` matches BOTH dropdowns. Rather than take the first (the theme
@@ -163,7 +163,7 @@ test("#24: an ambiguous selector is refused, with candidates the agent can act o
   expect(matches.every((m) => m.visible)).toBe(true);
 });
 
-test("#24: a unique selector with an explicit id is still accepted", async () => {
+test("a unique selector with an explicit id is still accepted", async () => {
   const tabId = await openTab("/controls");
   const reply = (await bridgeCall(bridge.port, bridge.token, "page.select", {
     tabId,
@@ -174,7 +174,7 @@ test("#24: a unique selector with an explicit id is still accepted", async () =>
   expect(reply.result?.value).toBe("aurora");
 });
 
-test("#24: a successful select reports which control it matched", async () => {
+test("a successful select reports which control it matched", async () => {
   const tabId = await openTab("/controls");
 
   // A specific selector, so this is the success path. The reply still says what it
@@ -196,7 +196,7 @@ test("#24: a successful select reports which control it matched", async () => {
   expect(reply.result!.matched!.options).toBe(2);
 });
 
-test("#24: a failed select names the control it matched and why", async () => {
+test("a failed select names the control it matched and why", async () => {
   const tabId = await openTab("/controls");
 
   // A specific control, but a value that is not one of its options: the error names
@@ -216,7 +216,7 @@ test("#24: a failed select names the control it matched and why", async () => {
   expect(reply.error?.detail?.options).toEqual(["trust-blue", "aurora"]);
 });
 
-test("#24: selecting by an explicit id reaches the intended control", async () => {
+test("selecting by an explicit id reaches the intended control", async () => {
   const tabId = await openTab("/controls");
 
   const reply = (await bridgeCall(bridge.port, bridge.token, "page.select", {

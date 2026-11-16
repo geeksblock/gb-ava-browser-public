@@ -222,7 +222,7 @@ async function runMarkerEffects(effects: readonly MarkerEffect[]): Promise<Comma
         try {
           // `effect.groupId` is the marker's own remembered id, not a caller's, so it
           // goes through `rememberedGroupId`: a stale one recovers by creating a group
-          // rather than failing the paint. A caller-named id must not recover (#32).
+          // rather than failing the paint. A caller-named id must not recover.
           const result = await groupCommand({ tabIds: effect.tabIds, rememberedGroupId: effect.groupId });
           const groupId = typeof (result as { groupId?: unknown }).groupId === "number" ? (result as { groupId: number }).groupId : null;
           if (groupId !== null) {
@@ -663,7 +663,7 @@ async function runMethod(method: string, params: JsonObject | undefined): Promis
       // where a caller learns the marker is gone, so it must not answer from a
       // group id Chrome deleted a minute ago.
       await ensureMarkerGroupLive();
-      // What the marker holds, and — the part #18 asked for — which of those tabs
+      // What the marker holds, and — the part callers needed — which of those tabs
       // no longer exists, so a caller mid-sequence learns a tab vanished without
       // hitting `not_found` first.
       const open = await chrome.tabs.query({});

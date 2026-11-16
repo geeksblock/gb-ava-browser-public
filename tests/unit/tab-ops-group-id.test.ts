@@ -1,5 +1,5 @@
 /**
- * `tabs.group` and a `groupId` the caller named (#32).
+ * `tabs.group` and a `groupId` the caller named.
  *
  * A caller that names a group is asking to join *that* group. The old code treated a
  * refusal as "the group we knew about has gone" and silently created a fresh one,
