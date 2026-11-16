@@ -10,7 +10,7 @@
  * The token is printed only by `token`. `serve` logs its fingerprint, never the value.
  */
 
-import { createLogger, type LogRecord } from "@gb-ava/protocol";
+import { BridgeUnverifiedError, createLogger, provenRpc, type LogRecord } from "@gb-ava/protocol";
 import { DEFAULT_PORT, loadConfig } from "./config.js";
 import { BIND_HOST, createBridge } from "./server.js";
 
@@ -90,6 +90,7 @@ async function serve(port: number | undefined, logLevel: string): Promise<void> 
     port: port ?? config.port ?? DEFAULT_PORT,
     token: config.token,
     allowedExtensionIds: config.allowedExtensionIds,
+    uploadDirectory: config.uploadDirectory,
     logger,
   });
 
@@ -120,6 +121,27 @@ async function serve(port: number | undefined, logLevel: string): Promise<void> 
   });
 }
 
+/** One authenticated call (ADR 0005); never sends the token itself. */
+async function proven(
+  targetPort: number,
+  token: string,
+  body: Record<string, unknown>,
+  timeoutMs: number,
+): Promise<{ status: number; body: unknown } | number> {
+  try {
+    return await provenRpc({ host: BIND_HOST, port: targetPort, token, body: JSON.stringify(body), timeoutMs });
+  } catch (error) {
+    if (error instanceof BridgeUnverifiedError) {
+      process.stderr.write(`gb-ava-bridge: ${error.message} — refusing to talk to it\n`);
+      return 3;
+    }
+    process.stderr.write(
+      `gb-ava-bridge: cannot reach the bridge on ${BIND_HOST}:${targetPort} (${(error as Error).message})\n`,
+    );
+    return 2;
+  }
+}
+
 async function health(port: number | undefined): Promise<number> {
   const config = loadConfig();
   const targetPort = port ?? config.port ?? DEFAULT_PORT;
@@ -135,12 +157,24 @@ async function health(port: number | undefined): Promise<number> {
     );
     return 2;
   }
-  const body: unknown = await response.json();
+  const body = (await response.json()) as { extension?: { connected?: boolean; health?: unknown; healthError?: unknown } };
+  const connected = body.extension?.connected === true;
+  // The extension's own detail (audit trail, dialogs) is only served behind the
+  // token, so it is fetched with a proof and folded into the same view.
+  if (connected && body.extension !== undefined) {
+    // Longer than the bridge's own 10 s request timeout, so a slow extension
+    // comes back as the bridge's `timeout` error rather than as "unreachable".
+    const detail = await proven(targetPort, config.token, { id: `cli-health-${Date.now()}`, method: "health" }, 15_000);
+    if (detail === 3) return 3; // not the real bridge: already reported, show nothing from it
+    if (typeof detail === "number") {
+      body.extension.healthError = { code: "timeout", message: "the extension's health did not arrive in time" };
+    } else {
+      const reply = detail.body as { ok?: boolean; result?: unknown; error?: unknown } | null;
+      if (reply?.ok === true) body.extension.health = reply.result;
+      else body.extension.healthError = reply?.error ?? null;
+    }
+  }
   process.stdout.write(`${JSON.stringify(body, null, 2)}\n`);
-  const connected =
-    typeof body === "object" && body !== null && "extension" in body
-      ? (body as { extension: { connected?: boolean } }).extension.connected === true
-      : false;
   return connected ? 0 : 1;
 }
 
@@ -158,26 +192,13 @@ async function call(port: number | undefined, method: string, paramsJson: string
   }
   const body: Record<string, unknown> = { id: `cli-${Date.now()}`, method };
   if (params !== undefined) body["params"] = params;
-  let response: Response;
-  try {
-    response = await fetch(`http://${BIND_HOST}:${targetPort}/rpc`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${config.token}` },
-      body: JSON.stringify(body),
-      // Long enough for a long-running method (a wait or a download) to answer
-      // with its own result instead of the client giving up first.
-      signal: AbortSignal.timeout(70_000),
-    });
-  } catch (error) {
-    process.stderr.write(
-      `gb-ava-bridge: cannot reach the bridge on ${BIND_HOST}:${targetPort} (${(error as Error).message})\n`,
-    );
-    return 2;
-  }
-  const payload: unknown = await response.json();
-  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
-  const ok = typeof payload === "object" && payload !== null && (payload as { ok?: boolean }).ok === true;
-  return response.ok && ok ? 0 : 1;
+  // Long enough for a long-running method (a wait or a download) to answer with
+  // its own result instead of the client giving up first.
+  const result = await proven(targetPort, config.token, body, 70_000);
+  if (typeof result === "number") return result;
+  process.stdout.write(`${JSON.stringify(result.body, null, 2)}\n`);
+  const ok = typeof result.body === "object" && result.body !== null && (result.body as { ok?: boolean }).ok === true;
+  return result.status === 200 && ok ? 0 : 1;
 }
 
 function token(): number {

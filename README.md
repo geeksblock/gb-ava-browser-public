@@ -27,12 +27,18 @@ focus.
                     └  gb-ava-bridge CLI                    └  offscreen + alarm keepalive
 ```
 
-- Extension service worker that connects to the local bridge, authenticates with a per-install
-  token, and stays connected across MV3 suspension (offscreen tick + `chrome.alarms`, tested over a
+- Extension service worker that connects to the local bridge and stays connected across MV3
+  suspension (offscreen tick + `chrome.alarms`, tested over a
   five-minute idle window).
-- Bridge that binds `127.0.0.1` only, rejects any non-extension origin on the socket and on every
-  HTTP route, requires the per-install token on `POST /rpc` (constant-time compare), and answers
-  `GET /health` with both its own state and the extension's.
+- Mutual authentication with a per-install token that is **never sent** (ADR 0005): the bridge proves
+  it holds the token before the extension does, so a program that grabbed the port while the bridge
+  was down learns nothing and is never obeyed. `POST /rpc` (CLI, adapter, MCP) uses one-time proofs
+  bound to each request body, and checks the bridge's signature on every answer.
+- Bridge that binds `127.0.0.1` only, refuses any `Host` but its own (DNS rebinding) and any
+  non-extension origin, and answers `GET /health` with its own state; the extension's detail (audit
+  trail, dialogs) is only for authenticated callers.
+- Guard rails: `page.*` never touches browser pages, extension pages (including Ava's own settings) or
+  local files; `page.upload` attaches only from the upload folder, `~/Ava Uploads` by default.
 - `tabs.list`, `tabs.query`, `tabs.navigate`, `tabs.group`, `tabs.ungroup`, `tabs.close`,
   `session.start` and `session.end` on the wire: explicit tab ids or predicates, navigation without
   focusing the tab, and the red `Ava` marker group that ungroups on session end, tab close, or one

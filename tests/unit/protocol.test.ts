@@ -6,7 +6,10 @@ import {
   RETRYABLE_BY_DEFAULT,
   WS_CLOSE,
   errorResponse,
+  isClientAuth,
   isClientHello,
+  isServerChallenge,
+  newNonce,
   isControlFrame,
   isKnownMethod,
   isResponseEnvelope,
@@ -98,19 +101,33 @@ describe("error taxonomy", () => {
 });
 
 describe("handshake frames", () => {
-  it("accepts a well-formed hello", () => {
+  it("accepts a well-formed v2 hello, which carries a nonce and never the token", () => {
     expect(
       isClientHello({
         type: "hello",
         protocolVersion: PROTOCOL_VERSION,
-        token: "t",
+        clientNonce: newNonce(),
         client: { name: "gb-ava-extension", version: "0.1.0" },
       }),
     ).toBe(true);
   });
 
-  it("rejects a hello with no token — an empty token must not authenticate", () => {
-    expect(isClientHello({ type: "hello", protocolVersion: 1, token: "", client: { name: "a", version: "1" } })).toBe(false);
+  it("rejects a v2 hello without a well-formed nonce", () => {
+    const client = { name: "a", version: "1" };
+    expect(isClientHello({ type: "hello", protocolVersion: PROTOCOL_VERSION, client })).toBe(false);
+    expect(isClientHello({ type: "hello", protocolVersion: PROTOCOL_VERSION, clientNonce: "short", client })).toBe(false);
+  });
+
+  it("still parses an older hello far enough to answer protocol_mismatch", () => {
+    expect(isClientHello({ type: "hello", protocolVersion: 1, token: "t", client: { name: "a", version: "1" } })).toBe(true);
+  });
+
+  it("recognises the challenge and auth frames only with well-formed nonces and proofs", () => {
+    const n = newNonce();
+    expect(isServerChallenge({ type: "hello_challenge", serverNonce: n, serverProof: n })).toBe(true);
+    expect(isServerChallenge({ type: "hello_challenge", serverNonce: n, serverProof: "x" })).toBe(false);
+    expect(isClientAuth({ type: "hello_auth", clientProof: n })).toBe(true);
+    expect(isClientAuth({ type: "hello_auth", clientProof: "" })).toBe(false);
   });
 
   it("recognises both hello replies", () => {

@@ -5,6 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, type BrowserContext, type Page } from "@playwright/test";
+import { provenRpc } from "../../shared/src/rpc-client.js";
+
+/** port -> token, so a health check can fetch the authenticated detail (ADR 0005). */
+const tokensByPort = new Map<number, string>();
 
 export const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
 export const extensionDir = join(repoRoot, "extension", "dist");
@@ -30,6 +34,8 @@ export interface BridgeHandle {
   port: number;
   token: string;
   configDir: string;
+  /** The only folder page.upload may attach from (ADR 0005); tests write files here. */
+  uploadDir: string;
   /** Everything the bridge wrote to stderr (structured JSON logs). */
   logs(): string;
   stop(): Promise<void>;
@@ -47,9 +53,10 @@ export async function startBridge(
   // the extension keeps the token it was paired with.
   const configDir = options.configDir ?? mkdtempSync(join(tmpdir(), "gb-ava-it-bridge-"));
   const requestedPort = options.port === undefined ? "0" : String(options.port);
+  const uploadDir = mkdtempSync(join(tmpdir(), "gb-ava-it-uploads-"));
   const child: ChildProcess = spawn(process.execPath, ["bridge/dist/cli.js", "serve", "--port", requestedPort], {
     cwd: repoRoot,
-    env: { ...process.env, AVA_BRIDGE_CONFIG_DIR: configDir, AVA_BRIDGE_LOG_LEVEL: "info" },
+    env: { ...process.env, AVA_BRIDGE_CONFIG_DIR: configDir, AVA_BRIDGE_UPLOAD_DIR: uploadDir, AVA_BRIDGE_LOG_LEVEL: "info" },
     stdio: ["ignore", "pipe", "pipe"],
   });
 
@@ -78,11 +85,13 @@ export async function startBridge(
   });
 
   const token = options.keepToken ?? readFileSync(join(configDir, "token"), "utf8").trim();
+  tokensByPort.set(port, readFileSync(join(configDir, "token"), "utf8").trim());
 
   return {
     port,
     token,
     configDir,
+    uploadDir,
     logs: () => stderr,
     stop: async () => {
       if (child.exitCode !== null) return;
@@ -308,10 +317,29 @@ export interface HealthBody {
       };
 }
 
+/**
+ * `GET /health` carries bridge state only; the extension's own health (audit,
+ * dialogs) is behind the token (ADR 0005), so it is fetched with a proof and
+ * folded in, giving the tests the same shape as before.
+ */
 export async function bridgeHealth(port: number): Promise<HealthBody> {
   const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(10_000) });
   if (!response.ok) throw new Error(`health returned ${response.status}`);
-  return (await response.json()) as HealthBody;
+  const body = (await response.json()) as HealthBody;
+  const token = tokensByPort.get(port);
+  if (body.extension.connected && token !== undefined) {
+    const detail = await provenRpc({
+      host: "127.0.0.1",
+      port,
+      token,
+      body: JSON.stringify({ id: `it-health-${Date.now()}`, method: "health" }),
+      timeoutMs: 10_000,
+    });
+    const reply = detail.body as { ok?: boolean; result?: Record<string, unknown>; error?: { code: string } } | null;
+    if (reply?.ok === true && reply.result !== undefined) body.extension.health = reply.result;
+    else if (reply?.error !== undefined) body.extension.healthError = reply.error;
+  }
+  return body;
 }
 
 export interface RpcReply {
@@ -328,15 +356,10 @@ export async function bridgeCall(
 ): Promise<RpcReply> {
   const body: Record<string, unknown> = { id: `it-${Date.now()}-${Math.random().toString(16).slice(2)}`, method };
   if (params !== undefined) body["params"] = params;
-  // /rpc is authenticated with the same per-install token as the extension
-  // socket; a caller that omits it gets a 401, never a command.
-  const response = await fetch(`http://127.0.0.1:${port}/rpc`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(20_000),
-  });
-  return (await response.json()) as RpcReply;
+  // /rpc needs a fresh proof of the per-install token (ADR 0005); a caller
+  // without one gets a 401, never a command, and the token is never sent.
+  const result = await provenRpc({ host: "127.0.0.1", port, token, body: JSON.stringify(body), timeoutMs: 20_000 });
+  return result.body as RpcReply;
 }
 
 /**

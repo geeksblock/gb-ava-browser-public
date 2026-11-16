@@ -153,11 +153,16 @@ two rules that matter for everything after it:
 
 ## Security boundary
 
-- Loopback bind, extension-origin check on the socket and on every HTTP route, constant-time token
-  compare, 0600 token file in `~/.config/gb-ava-bridge/` (re-asserted on every load).
-- `POST /rpc` requires that token (`Authorization: Bearer` or `x-ava-token`); `GET /health` and
-  `GET /version` are tokenless by design so a human can diagnose with `curl`. Decision and
-  alternatives: `docs/adr/0004-http-surface-authentication.md`.
+- Loopback bind, `Host` check (DNS rebinding) and extension-origin check on the socket and on every
+  HTTP route, 0600 token file in `~/.config/gb-ava-bridge/` (re-asserted on every load).
+- The token is never sent (ADR 0005). The socket runs a four-frame mutual proof in which the bridge
+  proves itself first and the extension acts on nothing before `hello_ok`; `POST /rpc` takes a
+  one-time proof over each request body (after `POST /auth/challenge`) and signs each answer.
+  `GET /health` and `GET /version` are tokenless by design so a human can diagnose with `curl`, and
+  carry no browsing detail. Decisions and alternatives: `docs/adr/0004-http-surface-authentication.md`,
+  `docs/adr/0005-mutual-token-proof-and-public-hardening.md`.
+- `page.*` refuses browser, extension and `file:` tabs; `page.upload` is confined to the upload folder
+  (resolved with `realpath` on the bridge); settings messages are accepted only from the options page.
 - Logs redact by key (`token`, `authorization`, …) and by value (the registered secret is replaced
   even inside a URL). The token is printed only by `gb-ava-bridge token`.
 - The agent may read settings, never change them. `page.evaluate` is off until a human enables it in

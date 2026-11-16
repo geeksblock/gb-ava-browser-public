@@ -4,6 +4,7 @@
  * can poke from outside and a `call()` that behaves like the bridge.
  */
 import { vi } from "vitest";
+import { PROOF_LABELS, makeProof, newNonce } from "@gb-ava/protocol";
 
 type Listener = (...args: any[]) => any;
 
@@ -64,6 +65,41 @@ export class FakeSocket {
   }
 }
 
+export const HARNESS_TOKEN = "test-token";
+
+/**
+ * Play the bridge's half of the v2 handshake on a fake socket (ADR 0005): read
+ * the worker's hello, answer with a challenge proved with `token`, wait for the
+ * worker's hello_auth, then send hello_ok. Returns what the worker sent.
+ */
+export async function completeHandshake(
+  socket: FakeSocket,
+  options: { token?: string; sessionId?: string } = {},
+): Promise<{ hello: any; auth: any | null }> {
+  const token = options.token ?? HARNESS_TOKEN;
+  let hello: any = null;
+  for (let waited = 0; waited < 2000 && hello === null; waited += 5) {
+    hello = socket.sent.find((frame) => frame?.type === "hello") ?? null;
+    if (hello === null) await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  if (hello === null) throw new Error("the worker never sent hello");
+  const serverNonce = newNonce();
+  const serverProof = await makeProof(token, PROOF_LABELS.wsServer, [hello.clientNonce, serverNonce]);
+  socket.fire("message", { data: JSON.stringify({ type: "hello_challenge", serverNonce, serverProof }) });
+  let auth: any = null;
+  for (let waited = 0; waited < 500 && auth === null; waited += 5) {
+    auth = socket.sent.find((frame) => frame?.type === "hello_auth") ?? null;
+    if (auth === null) await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  if (auth !== null) {
+    socket.fire("message", {
+      data: JSON.stringify({ type: "hello_ok", protocolVersion: 2, sessionId: options.sessionId ?? "s1", server: { name: "fake", version: "0" } }),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return { hello, auth };
+}
+
 export interface Reply {
   id: string;
   ok: boolean;
@@ -89,12 +125,15 @@ export const DEFAULT_TABS = () => [
   { id: 2, windowId: 10, index: 1, active: false, pinned: false, url: "https://b.test/", title: "B", status: "complete", groupId: -1 },
 ];
 
-export async function startWorker(initialTabs: any[] = DEFAULT_TABS()): Promise<Harness> {
+export async function startWorker(
+  initialTabs: any[] = DEFAULT_TABS(),
+  options: { skipHandshake?: boolean } = {},
+): Promise<Harness> {
   FakeSocket.instances = [];
   const tabs = initialTabs.map((tab) => ({ ...tab }));
   const alarms = new Map<string, any>();
   const groups = new Set<number>([7]);
-  const storage: Record<string, unknown> = { bridgeToken: "test-token", bridgeUrl: "ws://127.0.0.1:8765" };
+  const storage: Record<string, unknown> = { bridgeToken: HARNESS_TOKEN, bridgeUrl: "ws://127.0.0.1:8765" };
   let nextGroupId = 7;
   const events = {
     onRemoved: fakeEvent(),
@@ -165,6 +204,7 @@ export async function startWorker(initialTabs: any[] = DEFAULT_TABS()): Promise<
     },
     runtime: {
       id: "test-extension",
+      getURL: (path: string) => `chrome-extension://test-extension/${path.replace(/^\//, "")}`,
       getManifest: () => ({ version: "0.1.0" }),
       getContexts: vi.fn(async () => []),
       onInstalled: fakeEvent(),
@@ -208,6 +248,9 @@ export async function startWorker(initialTabs: any[] = DEFAULT_TABS()): Promise<
 
   const socket = FakeSocket.instances[0];
   if (!socket) throw new Error("the worker never opened a socket");
+  // The worker acts on nothing before the handshake completes, so the harness
+  // plays the real bridge's half of it first.
+  if (!options.skipHandshake) await completeHandshake(socket);
   let seq = 0;
 
   const harness: Harness = {

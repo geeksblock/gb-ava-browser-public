@@ -1,3 +1,5 @@
+import { copyFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { expect, test } from "@playwright/test";
 import { BridgeClient } from "../../adapter/src/client.js";
 import {
@@ -36,6 +38,13 @@ import {
  */
 
 let bridge: BridgeHandle;
+
+/** Copy a fixture into the bridge's upload folder and return its path there. */
+function stageUpload(source: string): string {
+  const target = join(bridge.uploadDir, basename(source));
+  copyFileSync(source, target);
+  return target;
+}
 let extension: ExtensionHandle;
 let site: FixtureSite;
 let client: BridgeClient;
@@ -152,7 +161,8 @@ test("M4: the adapter reports an intercepted file chooser and resolves it with a
   const uploaded = (await browser_upload(context(), {
     tabId,
     selector: "#file",
-    files: [new URL("../fixtures/note.txt", import.meta.url).pathname],
+    // page.upload attaches only from the bridge's upload folder (ADR 0005).
+    files: [stageUpload(new URL("../fixtures/note.txt", import.meta.url).pathname)],
   })) as { count: number };
   expect(uploaded.count).toBe(1);
 

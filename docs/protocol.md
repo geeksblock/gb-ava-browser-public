@@ -13,19 +13,35 @@ adapter can read together.
 - The bridge binds `127.0.0.1` only and rejects any upgrade whose `Origin` is not
   `chrome-extension://<id>` (empty allowlist = accept any extension origin; an id allowlist narrows
   it). A web page that guesses the port still cannot connect.
-- Token: a 256-bit per-install value from `gb-ava-bridge token`. It is presented once in `hello`,
-  compared in constant time, and never logged — logs carry an 8-hex-character fingerprint instead.
+- Token: a 256-bit per-install value from `gb-ava-bridge token`. It is **never sent** on either channel
+  (ADR 0005): each side proves it holds it with HMAC-SHA256 over fresh nonces, the bridge first. It is
+  never logged — logs carry an 8-hex-character fingerprint instead.
+- Every HTTP request and upgrade must carry `Host: 127.0.0.1:<port>`, `localhost:<port>` or
+  `[::1]:<port>`; anything else is `403` (DNS rebinding).
 - The extension makes no other network request. There is no telemetry and no remote config.
-- `POST /rpc` is the narrow local tool surface (the CLI, and the Cua-shaped adapter since M4). It **requires the
-  per-install token**: `Authorization: Bearer <token>` (or the `x-ava-token` header), compared in
-  constant time, so a page cannot drive the browser even if it guesses the port. The CLI reads the
-  same token from the config directory; a caller without it gets `401 unauthorized` and no command
-  is forwarded.
+- `POST /rpc` is the narrow local tool surface (the CLI, and the Cua-shaped adapter since M4). It **requires a
+  fresh proof of the per-install token** (ADR 0005):
+  1. `POST /auth/challenge` `{ "clientNonce": "<43 base64url chars>" }` →
+     `{ "ok": true, "serverNonce": "…", "serverProof": "…" }`, where
+     `serverProof = HMAC(token, "gb-ava/v2/rpc-server", clientNonce, serverNonce)`. The caller verifies
+     it and stops if it fails: whatever answered does not hold the token.
+  2. `POST /rpc` with `x-ava-nonce: <serverNonce>` and
+     `x-ava-proof: HMAC(token, "gb-ava/v2/rpc-client", serverNonce, sha256hex(body))`. A nonce is single
+     use (spent even on a wrong proof) and lives 30 s; at 1,024 outstanding the oldest is dropped.
+  3. A `200` answer carries `x-ava-response-proof: HMAC(token, "gb-ava/v2/rpc-response", serverNonce,
+     sha256hex(answer))`; callers refuse any 200, or any body claiming `ok: true`, without it.
+
+  `HMAC(token, label, a, b)` is HMAC-SHA256 keyed with the token's UTF-8 bytes over
+  `label + "\n" + a + "\n" + b`, base64url without padding. The raw token is **not** accepted as
+  `Authorization: Bearer` or `x-ava-token` any more. The CLI, the adapter and the MCP server do all of
+  this for the caller; a caller without a valid proof gets `401 unauthorized` and no command is forwarded.
 - Every HTTP route refuses a request that carries an `Origin` other than the extension's own (the
   same policy as the socket upgrade). A browser always sends `Origin`; the CLI and a `curl` from a
   terminal send none, which is why they are still allowed.
 - `GET /health` and `GET /version` stay tokenless so a human can diagnose with `curl`. They expose
-  bridge state and the extension's forwarded health, and can change nothing.
+  bridge state and whether the extension is connected, and can change nothing. The extension's own
+  health (audit trail, dialog text) is served only to an authenticated caller, as `/rpc` method
+  `health`; `gb-ava-bridge health` shows both.
 
 ## Envelope
 
@@ -58,23 +74,53 @@ Rules that are enforced in code, not convention:
   reported, not replayed. `retryable` describes the *caller's* safety to retry, and is `false` for
   `timeout`, `extension_disconnected`, `tab_changed` and `needs_human`.
 - Every method takes an explicit `tabId` or a URL predicate. There is no "current tab".
+- Every `page.*` method refuses a tab showing a browser page (`chrome:`, `devtools:`, …), any extension
+  page (including Ava's own settings) or a local file (`file:`) with `invalid_request`, before the debugger
+  is touched (ADR 0005). `tabs.navigate` / `tabs.create` accept only `http:`, `https:` and `about:` URLs.
 
 ## Handshake
 
-Client → server, first frame, within 5 s:
+Protocol v2 (ADR 0005): four frames, the whole exchange within 5 s. The token is never sent; the
+bridge proves it holds the token **before** the extension does, so whatever else might be answering on
+the port learns nothing and is never obeyed.
+
+Client → server, first frame:
 
 ```json
-{ "type": "hello", "protocolVersion": 1, "token": "…", "client": { "name": "gb-ava-extension", "version": "0.1.0", "extensionId": "…", "resumed": false } }
+{ "type": "hello", "protocolVersion": 2, "clientNonce": "<43 base64url chars>", "client": { "name": "gb-ava-extension", "version": "0.1.0", "extensionId": "…", "resumed": false } }
+```
+
+Server → client, the bridge proves itself:
+
+```json
+{ "type": "hello_challenge", "serverNonce": "…", "serverProof": "HMAC(token, \"gb-ava/v2/ws-server\", clientNonce, serverNonce)" }
+```
+
+Client → server, only after the server proof verified:
+
+```json
+{ "type": "hello_auth", "clientProof": "HMAC(token, \"gb-ava/v2/ws-client\", clientNonce, serverNonce)" }
 ```
 
 Server → client, accepted:
 
 ```json
-{ "type": "hello_ok", "protocolVersion": 1, "sessionId": "uuid", "server": { "name": "gb-ava-bridge", "version": "0.1.0" } }
+{ "type": "hello_ok", "protocolVersion": 2, "sessionId": "uuid", "server": { "name": "gb-ava-bridge", "version": "0.1.0" } }
 ```
 
 Server → client, rejected: `{ "type": "hello_error", "error": { … } }` followed by a close with the
 matching code.
+
+Rules both sides enforce:
+
+- Neither side acts on a request frame before `hello_ok`. The bridge closes a socket that sends one
+  (4010); the extension ignores it.
+- The extension treats a `hello_ok` that did not follow a verified challenge, a bad server proof, or a
+  `hello_error` from a peer that never proved itself as **an unverified bridge**: it closes with 4011 and
+  blocks (`blockedReason: bridge_unverified`) until a human acts. A wrong pasted token looks the same.
+- Before authentication the bridge refuses frames over 4 KB, and at most 8 sockets may be
+  mid-handshake; a ninth evicts the oldest (so idle sockets cannot lock the extension out). A refusal at this stage is recorded as
+  `bridge.lastRejectedHandshake`, never as the extension's `lastError`: any local process can cause one.
 
 | Close code | Meaning |
 | --- | --- |
@@ -83,7 +129,8 @@ matching code.
 | 4003 | `badOrigin` — refused at the HTTP upgrade |
 | 4008 | `handshakeTimeout` — no `hello` within 5 s |
 | 4009 | `replaced` — a newer connection took over |
-| 4010 | `malformed` — first frame was not a valid `hello` |
+| 4010 | `malformed` — a frame out of turn, or not a valid handshake frame |
+| 4011 | `serverUnverified` — *sent by the extension*: the peer could not prove the token |
 
 A second authenticated connection **replaces** the first (4009) rather than being refused: a stale
 socket must not be able to lock a browser out. The extension reports `resumed: true` when it has
@@ -134,14 +181,16 @@ covers everything the extension saw, including commands it refused itself (`inva
 
 ### `health`
 
-Bridge-side: `GET http://127.0.0.1:<port>/health` returns the bridge block plus the extension's
-forwarded health. It is the single question "is Ava's browser path alive?", and the M0 acceptance
-signal.
+Bridge-side: `GET http://127.0.0.1:<port>/health` returns the bridge block and whether the extension
+is connected, with `extension.health: null`. The extension's own health below (audit, dialogs) is
+served only through an authenticated `/rpc` call to method `health`; `gb-ava-bridge health` merges the
+two into the view shown here, which is the single answer to "is Ava's browser path alive?" and the M0
+acceptance signal.
 
 ```json
 {
   "ok": true,
-  "bridge": { "name": "gb-ava-bridge", "version": "0.1.0", "protocolVersion": 1, "host": "127.0.0.1", "port": 8765, "uptimeMs": 0, "tokenConfigured": true, "tokenFingerprint": "1a2b3c4d", "socketsSeen": 1 },
+  "bridge": { "name": "gb-ava-bridge", "version": "0.1.0", "protocolVersion": 2, "host": "127.0.0.1", "port": 8765, "uptimeMs": 0, "tokenConfigured": true, "tokenFingerprint": "1a2b3c4d", "socketsSeen": 1, "uploadDirectory": "/Users/…/Ava Uploads" },
   "extension": {
     "connected": true,
     "sessionId": "…",
@@ -149,7 +198,7 @@ signal.
     "health": {
       "worker": { "startedAt": "…", "uptimeMs": 0, "startsThisInstall": 1, "phase": "connected" },
       "keepalive": { "offscreenDocument": true, "alarmScheduled": true, "ticksReceived": 0, "reconnect": { "attempts": 0 } },
-      "session": { "id": "…", "protocolVersion": 1 },
+      "session": { "id": "…", "protocolVersion": 2 },
       "settings": { "evaluateEnabled": false, "evaluateEnabledBy": "human" },
       "lastError": null
     }
@@ -406,7 +455,10 @@ nothing.
   picker instead of the contact picker on a real portal. `page.click` and `page.type` keep
   first-match resolution: a repeated selector there is usually intended (one button per row), and
   refusing it would break ordinary flows.
-- `page.upload` attaches absolute file paths with `DOM.setFileInputFiles` — a real file-picker result,
+- `page.upload` attaches files **only from the bridge's upload folder** (`~/Ava Uploads` by default;
+  `uploadDirectory` in the bridge `config.json`; ADR 0005). The bridge resolves symlinks and `..` with
+  `realpath`, refuses anything outside the folder (or everything, if no folder is configured), and
+  forwards the real paths. It then attaches them with `DOM.setFileInputFiles` — a real file-picker result,
   no dialog, and it works on a hidden input (the usual styled-label pattern), because it does not need
   a box. Chrome does **not** refuse a path that does not exist: it manufactures a zero-byte `File`
   named after the path and reports no error, so the page really does receive a ghost. The adapter
@@ -485,4 +537,6 @@ guessing a reason in their place. A `needs_human` without a recognised reason ar
 
 The protocol version is an integer in `hello` and in every `health` payload. A mismatch is refused
 at the handshake (4002) rather than being tolerated; both sides ship from this repo, so drift means
-a stale unpacked extension, which the operator should reload.
+a stale unpacked extension, which the operator should reload. Version 2 (ADR 0005) replaced the token
+in `hello` with the mutual proof. A v1 extension meeting a v2 bridge gets `protocol_mismatch` (4002);
+a v2 extension meeting a v1 bridge cannot verify it and blocks as `bridge_unverified`.

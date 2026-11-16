@@ -1,5 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 import {
@@ -172,7 +171,7 @@ test("M3: select, upload, scroll and key act without focus", async () => {
   expect(selected.ok, JSON.stringify(selected.error)).toBe(true);
   expect(selected.result?.value).toBe("green");
 
-  const dir = mkdtempSync(join(tmpdir(), "gb-ava-upload-"));
+  const dir = bridge.uploadDir; // the only folder page.upload may attach from (ADR 0005)
   const file = join(dir, "note.txt");
   writeFileSync(file, "hello from the test\n");
   const uploaded = await call<{ count: number }>("page.upload", { tabId, selector: "#file", files: [file] });

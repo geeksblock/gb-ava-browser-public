@@ -96,7 +96,7 @@ export const MCP_TOOLS: McpTool[] = [
       "Open a new tab on a URL. It opens in the BACKGROUND by default (active:false), so Chrome is not raised and the owner's attention is untouched — this is the way to reach a page the user has not already opened without stealing focus. Answers once the page has finished loading, with the same tab descriptor as browser_tabs. Pass `background: false` only when the caller actually wants the tab focused.",
     inputSchema: required(
       {
-        url: { type: "string", description: "Absolute http:, https:, file: or about: URL." },
+        url: { type: "string", description: "Absolute http:, https: or about: URL. Local files (file:) are refused." },
         windowId: { type: "integer", description: "Window to open the tab in. Defaults to the window Chrome chooses." },
         background: { type: "boolean", description: "Default true: open without focusing. false focuses the tab." },
         pinned: { type: "boolean", description: "Open the tab pinned." },
@@ -127,7 +127,7 @@ export const MCP_TOOLS: McpTool[] = [
   {
     name: "browser_navigate",
     description:
-      "Navigate a tab to a URL without bringing it to the front, and wait for the load. Http(s), file and about:blank only.",
+      "Navigate a tab to a URL without bringing it to the front, and wait for the load. Http(s) and about:blank only; local files are refused.",
     inputSchema: required({ tabId, url: { type: "string" } }, ["tabId", "url"]),
     handler: (context, args) => browser_navigate(context, { tabId: Number(args["tabId"]), url: String(args["url"]) }),
   },
@@ -272,7 +272,8 @@ export const MCP_TOOLS: McpTool[] = [
   },
   {
     name: "browser_upload",
-    description: "Attach absolute file paths to a file input, including a hidden one. Satisfies a pending file-chooser request.",
+    description:
+      "Attach files to a file input, including a hidden one. Only files inside the bridge's upload folder (default ~/Ava Uploads) can be attached; ask the human to put the file there. Satisfies a pending file-chooser request.",
     inputSchema: required({ tabId, ...target, files: { type: "array", items: { type: "string" }, minItems: 1 } }, [
       "tabId",
       "files",

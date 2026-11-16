@@ -74,7 +74,8 @@ describe("tabs.navigate", () => {
     expect(isNavigableUrl("https://example.com")).toBe(true);
     expect(isNavigableUrl("http://10.0.0.4")).toBe(true);
     expect(isNavigableUrl("about:blank")).toBe(true);
-    expect(isNavigableUrl("file:///tmp/x.html")).toBe(true);
+    // Refused since ADR 0005: with file-URL access an agent could read any local file.
+    expect(isNavigableUrl("file:///tmp/x.html")).toBe(false);
     // Chrome refuses a background navigation to a data: URL, so it is refused here too.
     expect(isNavigableUrl("data:text/html,<title>x</title>")).toBe(false);
     expect(isNavigableUrl("javascript:void(0)")).toBe(false);

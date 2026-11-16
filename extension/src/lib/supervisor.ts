@@ -46,6 +46,13 @@ export type SupervisorEvent =
   | { type: "socket_open"; now: number }
   | { type: "handshake_ok"; now: number; sessionId: string }
   | { type: "handshake_rejected"; now: number; code: "unauthorized" | "protocol_mismatch" | "invalid" }
+  /**
+   * The peer could not prove it holds the token (ADR 0005): either the pasted
+   * token is wrong, or something other than the bridge holds the port. The two
+   * look identical from here, and both need a human, so this blocks (fail closed)
+   * exactly like a refused token instead of retrying into a possible impostor.
+   */
+  | { type: "handshake_unverified"; now: number; reason: string }
   | { type: "socket_closed"; now: number }
   | { type: "connect_failed"; now: number }
   | { type: "stop"; now: number };
@@ -226,6 +233,25 @@ export function reduce(state: SupervisorState, event: SupervisorEvent, options: 
           ...state,
           phase: "blocked",
           blockedReason: event.code,
+          attempts: 0,
+          attemptStartedAt: undefined,
+          nextAttemptAt: undefined,
+          sessionId: undefined,
+          connectedAt: undefined,
+          since: event.now,
+        },
+        effects,
+      };
+    }
+
+    case "handshake_unverified": {
+      effects.push({ type: "close_socket", reason: "bridge_unverified" });
+      effects.push({ type: "note", level: "warn", message: "bridge not verified; waiting for a human", fields: { reason: event.reason } });
+      return {
+        state: {
+          ...state,
+          phase: "blocked",
+          blockedReason: "bridge_unverified",
           attempts: 0,
           attemptStartedAt: undefined,
           nextAttemptAt: undefined,

@@ -65,18 +65,20 @@ node bridge/dist/cli.js call settings.get
 curl -s http://127.0.0.1:8765/health | jq .extension
 ```
 
-`/health` and `/version` need no credential so the `curl` above keeps working. `POST /rpc` does need
-the per-install token; the CLI adds it for you, and a hand-written call must add it too:
+`/health` and `/version` need no credential so the `curl` above keeps working; they show bridge state
+and whether the extension is connected. Everything else goes through `POST /rpc`, which needs a fresh
+proof of the per-install token (ADR 0005, `docs/protocol.md` "Transport"): the token itself is never
+sent, so a plain `curl` with a bearer header no longer works. Use the CLI, which does the challenge,
+the proof and the answer check for you:
 
 ```bash
-curl -s http://127.0.0.1:8765/rpc \
-  -H "authorization: Bearer $(node bridge/dist/cli.js token 2>/dev/null)" \
-  -H "content-type: application/json" \
-  -d '{"id":"manual-1","method":"settings.get"}' | jq .
+node bridge/dist/cli.js call settings.get
+node bridge/dist/cli.js health          # bridge state plus the extension's own health
 ```
 
-A caller without it gets `401 unauthorized`; a browser page is refused with `403` outright, because
-every HTTP route rejects an `Origin` that is not the extension's.
+A caller without a valid proof gets `401 unauthorized`; a browser page is refused with `403` outright
+(foreign `Origin` or `Host`). If the CLI says the bridge "could not prove it holds the bridge token",
+something other than the bridge is answering on that port: stop it, start the bridge, try again.
 
 ### Tabs and the marker
 
@@ -153,7 +155,8 @@ node bridge/dist/cli.js call page.type '{"tabId":123,"selector":"#email","text":
 node bridge/dist/cli.js call page.waitFor '{"tabId":123,"selector":"#code","timeoutMs":8000}'
 node bridge/dist/cli.js call page.click '{"tabId":123,"nodeId":101}'      # a nodeId from page.readAX
 node bridge/dist/cli.js call page.select '{"tabId":123,"selector":"#colour","value":"green"}'
-node bridge/dist/cli.js call page.upload '{"tabId":123,"selector":"#file","files":["/tmp/note.txt"]}'
+cp /tmp/note.txt ~/"Ava Uploads"/      # page.upload attaches only from the upload folder (ADR 0005)
+node bridge/dist/cli.js call page.upload '{"tabId":123,"selector":"#file","files":["'"$HOME"'/Ava Uploads/note.txt"]}'
 ```
 
 If a command answers `needs_human` with `reason: "javascript_dialog"`, a dialog is open on that tab:

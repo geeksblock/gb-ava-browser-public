@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { configDirectory, ensureToken, generateToken, loadConfig, readConfigFile } from "../../bridge/src/config.js";
+import { assertSafeUploadDirectory, configDirectory, ensureToken, expandUploadDirectory, generateToken, loadConfig, readConfigFile } from "../../bridge/src/config.js";
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "gb-ava-bridge-test-"));
@@ -87,12 +87,28 @@ describe("config directory", () => {
 
   it("loads a complete config and marks whether the token was just created", () => {
     const dir = tempDir();
-    const loaded = loadConfig({ AVA_BRIDGE_CONFIG_DIR: dir } as NodeJS.ProcessEnv);
+    const loaded = loadConfig({ AVA_BRIDGE_CONFIG_DIR: dir, AVA_BRIDGE_UPLOAD_DIR: join(dir, "uploads") } as NodeJS.ProcessEnv);
     expect(loaded.tokenCreated).toBe(true);
     expect(loaded.token.length).toBeGreaterThan(30);
     expect(loaded.allowedExtensionIds).toEqual([]);
-    const again = loadConfig({ AVA_BRIDGE_CONFIG_DIR: dir } as NodeJS.ProcessEnv);
+    const again = loadConfig({ AVA_BRIDGE_CONFIG_DIR: dir, AVA_BRIDGE_UPLOAD_DIR: join(dir, "uploads") } as NodeJS.ProcessEnv);
     expect(again.token).toBe(loaded.token);
     expect(again.tokenCreated).toBe(false);
+  });
+});
+
+describe("the upload folder is a dedicated folder (ADR 0005)", () => {
+  it("refuses /, the home folder and any folder that contains the bridge config", () => {
+    const home = "/Users/someone";
+    const config = "/Users/someone/.config/gb-ava-bridge";
+    for (const bad of ["/", home, "/Users/someone/.config", config]) {
+      expect(() => assertSafeUploadDirectory(bad, config, home), bad).toThrow(/dedicated folder/);
+    }
+    expect(() => assertSafeUploadDirectory("/Users/someone/Ava Uploads", config, home)).not.toThrow();
+  });
+
+  it("expands ~/ and refuses a relative path", () => {
+    expect(expandUploadDirectory("~/Ava Uploads", "/Users/someone")).toBe("/Users/someone/Ava Uploads");
+    expect(() => expandUploadDirectory("uploads", "/Users/someone")).toThrow(/absolute/);
   });
 });

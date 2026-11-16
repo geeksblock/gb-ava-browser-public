@@ -15,6 +15,7 @@ The **Geeksblock Ava Browser Extension** — an MV3 Chrome extension plus a loca
 5. **No silent retries.** `click` and `type` are not idempotent. If a command's outcome is unknown, report it; do not replay it.
 6. **Secrets never leave the machine** and are never logged: the bridge token, and anything a caller marks `sensitive`.
 7. **The agent never changes its own settings.** `page.evaluate` ships behind an options toggle (plan §5.1), off by default, flipped by the human in the extension UI. Ava may read it via `settings.get`/`health`; if it needs it on, it asks. When disabled, return `evaluate_disabled` with a readable hint — never silently fall back to something else.
+8. **The token never crosses the wire (ADR 0005).** Both channels use the mutual HMAC proof, with the bridge proving itself first; neither side acts on a request before the handshake completes. Never reintroduce a bearer header, a token in `hello`, or a request path that runs before `hello_ok` — `tests/unit/bridge.test.ts` and `tests/unit/security-hardening.test.ts` fail if you do. Likewise keep the `Host` check, the narrow `/health`, the upload-folder confinement, the protected-tab guard and the options-page sender check.
 
 ## Conventions
 

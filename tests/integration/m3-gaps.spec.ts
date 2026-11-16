@@ -1,5 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 import {
@@ -339,7 +338,7 @@ test("GAP: page.select cannot select an option the control says is disabled", as
 test("GAP: page.upload attaches every file, and the page receives them in order", async () => {
   const tabId = await backgroundTab("/form");
   await enableEvaluate(await extension.optionsPage(), bridge.port, bridge.token);
-  const dir = mkdtempSync(join(tmpdir(), "gb-ava-gap-upload-"));
+  const dir = bridge.uploadDir; // the only folder page.upload may attach from (ADR 0005)
   const first = join(dir, "one.txt");
   const second = join(dir, "two.txt");
   writeFileSync(first, "first file\n");
@@ -372,15 +371,24 @@ test("GAP: page.upload attaches every file, and the page receives them in order"
   // What the reply can do is make the ghost visible: it reports what the input
   // actually holds (`attached`) and names the zero-byte entries (`empty`), so a
   // caller that expected a real file can see it did not get one.
+  // Since ADR 0005 the bridge resolves every path before Chrome sees it, so a path
+  // that does not exist never reaches the page at all: no ghost is manufactured.
   const absent = join(dir, "absent.txt");
-  const ghost = await call<{ count: number; attached: Array<{ name: string; size: number }>; empty?: string[] }>(
+  const ghost = await call<null>("page.upload", { tabId, selector: "#file", files: [absent] });
+  expect(ghost.ok, "a missing file must be refused before Chrome can invent a ghost").toBe(false);
+  expect(ghost.error?.code).toBe("invalid_request");
+
+  // A real but empty file still reaches the page, and is named in `empty` so a
+  // caller that expected content can see it did not get any.
+  const emptyFile = join(dir, "empty.txt");
+  writeFileSync(emptyFile, "");
+  const zero = await call<{ count: number; attached: Array<{ name: string; size: number }>; empty?: string[] }>(
     "page.upload",
-    { tabId, selector: "#file", files: [absent] },
+    { tabId, selector: "#file", files: [emptyFile] },
   );
-  expect(ghost.ok).toBe(true);
-  expect(ghost.result?.count).toBe(1);
-  expect(ghost.result?.attached).toEqual([{ name: "absent.txt", size: 0 }]);
-  expect(ghost.result?.empty, "a zero-byte ghost must be reported, not hidden").toEqual(["absent.txt"]);
+  expect(zero.ok, JSON.stringify(zero.error)).toBe(true);
+  expect(zero.result?.attached).toEqual([{ name: "empty.txt", size: 0 }]);
+  expect(zero.result?.empty, "a zero-byte file must be reported, not hidden").toEqual(["empty.txt"]);
 
   // A real file is not flagged as empty, so the signal is usable.
   const realAgain = await call<{ empty?: string[] }>("page.upload", { tabId, selector: "#file", files: [first] });

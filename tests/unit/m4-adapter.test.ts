@@ -65,8 +65,8 @@ describe("the token comes from the config directory", () => {
     expect(() => readToken({ AVA_BRIDGE_CONFIG_DIR: empty } as NodeJS.ProcessEnv)).toThrow(/no bridge token at/);
   });
 
-  it("refuses a host that is not this machine, because the token is sent in clear text", () => {
-    expect(() => new BridgeClient({ host: "10.0.0.4", token: "x" })).toThrow(/loopback only/);
+  it("refuses any host but 127.0.0.1, the only address the bridge binds (ADR 0005)", () => {
+    expect(() => new BridgeClient({ host: "10.0.0.4", token: "x" })).toThrow(/127\.0\.0\.1 only/);
     expect(() => new BridgeClient({ host: "127.0.0.1", token: "x" })).not.toThrow();
   });
 });

@@ -5,14 +5,19 @@
  *   - bind 127.0.0.1 only (never a wildcard address);
  *   - accept exactly one authenticated extension socket, rejecting any other
  *     origin (a web page cannot connect just because it guessed the port);
- *   - perform the v1 hello handshake with the per-install token;
- *   - answer `GET /health` with the bridge's own state *and* the extension's
- *     forwarded health, so "is Ava's browser path alive?" has a single answer;
+ *   - perform the v2 mutual handshake (ADR 0005): the bridge proves it holds the
+ *     per-install token before the extension proves it; the token never crosses
+ *     the wire, on the socket or on `/rpc`;
+ *   - refuse any `Host` that is not this listener (DNS rebinding);
+ *   - answer `GET /health` with bridge state only; the extension's detailed health
+ *     (audit trail, dialogs) is behind the token, via `/rpc` method `health`;
  *   - fail in-flight commands loudly when the socket drops. Never retried here;
  *     `page.click` and `page.type` are not idempotent (AGENTS.md rule 5).
  */
 
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { realpathSync, statSync } from "node:fs";
+import { isAbsolute, sep } from "node:path";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
@@ -23,8 +28,15 @@ import {
   PROTOCOL_VERSION,
   WS_CLOSE,
   errorResponse,
+  isClientAuth,
   isClientHello,
   isControlFrame,
+  isNonce,
+  makeProof,
+  newNonce,
+  PROOF_LABELS,
+  sha256Hex,
+  verifyProof,
   isErrorPayload,
   isPlainObject,
   isResponseEnvelope,
@@ -50,6 +62,32 @@ export const EXTENSION_PATH = "/extension";
  * `extension_disconnected` for a message that was simply big.
  */
 const MAX_PAYLOAD_BYTES = 12_000_000;
+/**
+ * Before a socket has proved the token it may only send handshake frames, which
+ * are tiny. A bigger frame is refused, and at most this many sockets may be
+ * mid-handshake at once, so an unauthenticated local process cannot make the
+ * bridge buffer many full-size frames.
+ */
+const MAX_PREAUTH_FRAME_BYTES = 4_096;
+/**
+ * At this many sockets mid-handshake, a new upgrade evicts the *oldest* pending
+ * one instead of being refused. Refusing would let any local process hold every
+ * slot with idle sockets and lock the real extension out; evicting means an
+ * attacker must out-race a handshake that takes milliseconds, over and over.
+ */
+const MAX_PENDING_CONNECTIONS = 8;
+/**
+ * `/auth/challenge` nonces: single use, short-lived, bounded. When the table is
+ * full the oldest nonce is dropped (not the new request refused), for the same
+ * reason: a flood must not lock out a legitimate caller, who spends its nonce
+ * within milliseconds of receiving it.
+ */
+const RPC_NONCE_TTL_MS = 30_000;
+const MAX_OUTSTANDING_RPC_NONCES = 1_024;
+const MAX_CHALLENGE_BODY_BYTES = 1_024;
+export const RPC_NONCE_HEADER = "x-ava-nonce";
+export const RPC_PROOF_HEADER = "x-ava-proof";
+export const RPC_RESPONSE_PROOF_HEADER = "x-ava-response-proof";
 const PEER_PING_INTERVAL_MS = 30_000;
 
 /**
@@ -69,6 +107,11 @@ export interface BridgeOptions {
   logger: Logger;
   requestTimeoutMs?: number;
   healthTimeoutMs?: number;
+  /**
+   * The only folder `page.upload` may attach files from (ADR 0005). Chosen by the
+   * human in the bridge config; undefined disables uploads entirely.
+   */
+  uploadDirectory?: string;
 }
 
 export interface BridgeHealth {
@@ -85,6 +128,12 @@ export interface BridgeHealth {
     tokenFingerprint: string;
     allowedExtensionIds: string[];
     socketsSeen: number;
+    uploadDirectory: string | null;
+    /**
+     * The last handshake refused before the peer proved the token. Any local
+     * process can cause one, so it is a hint, never proof of what the extension saw.
+     */
+    lastRejectedHandshake?: { at: string; error: ErrorPayload };
   };
   extension: ExtensionHealthView;
 }
@@ -99,6 +148,7 @@ export type ExtensionHealthView =
       lastSeenAgoMs: number;
       remoteAddress: string;
       client: ClientHello["client"];
+      /** Only filled for an authenticated caller; `GET /health` never carries it. */
       health: JsonValue | null;
       healthError?: ErrorPayload;
     };
@@ -124,35 +174,73 @@ export function isAllowedOrigin(origin: string | undefined, allowedExtensionIds:
   return allowedExtensionIds.includes(id);
 }
 
-function tokensMatch(provided: string, expected: string): boolean {
-  const a = Buffer.from(provided, "utf8");
-  const b = Buffer.from(expected, "utf8");
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
+/**
+ * DNS rebinding: a page on attacker.example can make its own name resolve to
+ * 127.0.0.1, and a same-origin request then carries no Origin header. Its Host
+ * header still names attacker.example, so only this listener's own names pass.
+ */
+export function isAllowedHost(host: string | undefined, port: number): boolean {
+  if (typeof host !== "string" || host.length === 0) return false;
+  const value = host.toLowerCase();
+  return value === `127.0.0.1:${port}` || value === `localhost:${port}` || value === `[::1]:${port}`;
 }
 
-/** Header a local tool may use instead of `Authorization: Bearer`. */
-export const TOKEN_HEADER = "x-ava-token";
 export const MAX_RPC_BODY_BYTES = 256_000;
 
 /**
- * The token a local HTTP caller presented, if any. Both spellings are accepted
- * because `curl -H` with a bearer header and a bare custom header are equally
- * common in runbooks; neither is ever logged.
+ * Resolve each upload path inside the human-chosen upload folder. Symlinks and
+ * `..` are resolved first, so neither can reach outside it. Returns the real
+ * paths, which are what the extension attaches.
  */
-export function presentedToken(req: IncomingMessage): string | null {
-  const authorization = req.headers.authorization;
-  if (typeof authorization === "string") {
-    const bearer = /^Bearer\s+(.+)$/i.exec(authorization.trim());
-    if (bearer?.[1] !== undefined) {
-      const value = bearer[1].trim();
-      if (value.length > 0) return value;
+export function resolveUploadPaths(
+  files: unknown,
+  uploadDirectory: string | undefined,
+): { ok: true; files: string[] } | { ok: false; error: ErrorPayload } {
+  if (uploadDirectory === undefined) {
+    return { ok: false, error: makeError("invalid_request", "uploads are disabled: no upload folder is configured for the bridge", false) };
+  }
+  let root: string;
+  try {
+    root = realpathSync(uploadDirectory);
+    const info = statSync(root);
+    // A folder another account owns, or one others may write into, could be
+    // filled with links or files the human never chose.
+    const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+    if (!info.isDirectory() || (uid !== undefined && info.uid !== uid) || (info.mode & 0o022) !== 0) {
+      return {
+        ok: false,
+        error: makeError("invalid_request", "the upload folder must be a folder you own that others cannot write to", false, { uploadDirectory }),
+      };
+    }
+  } catch {
+    return { ok: false, error: makeError("invalid_request", "the upload folder does not exist", false, { uploadDirectory }) };
+  }
+  if (!Array.isArray(files) || files.length === 0) {
+    return { ok: false, error: makeError("invalid_request", "`files` must be a non-empty array of paths", false) };
+  }
+  // One answer for "outside the folder", "does not exist" and "not a file":
+  // a caller must not be able to probe what exists elsewhere on the machine.
+  const refused = (): { ok: false; error: ErrorPayload } => ({
+    ok: false,
+    error: makeError(
+      "invalid_request",
+      "cannot attach files: each path must be an existing file inside the upload folder",
+      false,
+      { uploadDirectory: root },
+    ),
+  });
+  const resolved: string[] = [];
+  for (const entry of files) {
+    if (typeof entry !== "string" || !isAbsolute(entry)) return refused();
+    try {
+      const real = realpathSync(entry);
+      if (!real.startsWith(root + sep) || !statSync(real).isFile()) return refused();
+      resolved.push(real);
+    } catch {
+      return refused();
     }
   }
-  const header = req.headers[TOKEN_HEADER];
-  const value = Array.isArray(header) ? header[0] : header;
-  if (typeof value === "string" && value.trim().length > 0) return value.trim();
-  return null;
+  return { ok: true, files: resolved };
 }
 
 interface PendingCommand {
@@ -167,6 +255,10 @@ class ExtensionPeer {
   readonly connectedAt: number;
   readonly remoteAddress: string;
   hello: ClientHello | null = null;
+  /** Handshake progress (ADR 0005). Only `done` peers may carry requests. */
+  stage: "hello" | "proving" | "auth" | "verifying" | "done" = "hello";
+  clientNonce = "";
+  serverNonce = "";
   lastSeenAt: number;
   /** Set when this peer was refused, so the close handler reports the real cause. */
   rejection: ErrorPayload | null = null;
@@ -286,23 +378,42 @@ export function createBridge(options: BridgeOptions): Bridge {
   /** The address the server actually bound, read back from the listener. */
   let listeningHost = BIND_HOST;
   let lastDisconnectError: ErrorPayload | undefined;
+  let lastRejectedHandshake: { at: string; error: ErrorPayload } | undefined;
+  const rpcNonces = new Map<string, { clientNonce: string; expiresAt: number }>();
+  const uploadDirectory = options.uploadDirectory;
   let heartbeat: NodeJS.Timeout | null = null;
 
   const pendingConnections = new Set<ExtensionPeer>();
 
-  function writeJson(res: ServerResponse, status: number, body: unknown): void {
+  function writeJson(res: ServerResponse, status: number, body: unknown, extraHeaders: Record<string, string> = {}): void {
     // One response per request, whoever gets there first. Without this a second
     // writer (a late `end` after the 413 path, or a timeout racing a reply)
     // throws ERR_HTTP_HEADERS_SENT inside an event handler, which on the CLI's
     // single-threaded path takes the bridge down with it.
     if (res.headersSent || res.writableEnded) return;
-    const payload = JSON.stringify(body);
+    writeRaw(res, status, JSON.stringify(body), extraHeaders);
+  }
+
+  function writeRaw(res: ServerResponse, status: number, payload: string, extraHeaders: Record<string, string> = {}): void {
+    if (res.headersSent || res.writableEnded) return;
     res.writeHead(status, {
       "content-type": "application/json; charset=utf-8",
       "content-length": Buffer.byteLength(payload),
       "cache-control": "no-store",
+      ...extraHeaders,
     });
     res.end(payload);
+  }
+
+  /**
+   * An `/rpc` answer carries its own proof, bound to the nonce the caller was
+   * issued and the exact bytes of the body, so the caller can tell the real
+   * bridge's answer from one invented by whatever else might hold the port.
+   */
+  async function writeSignedJson(res: ServerResponse, status: number, body: unknown, serverNonce: string): Promise<void> {
+    const payload = JSON.stringify(body);
+    const proof = await makeProof(options.token, PROOF_LABELS.rpcResponse, [serverNonce, await sha256Hex(payload)]);
+    writeRaw(res, status, payload, { [RPC_RESPONSE_PROOF_HEADER]: proof });
   }
 
   /**
@@ -322,9 +433,73 @@ export function createBridge(options: BridgeOptions): Bridge {
     return makeError("internal", "the command failed");
   }
 
-  function httpAuthorised(req: IncomingMessage): boolean {
-    const provided = presentedToken(req);
-    return provided !== null && tokensMatch(provided, options.token);
+  function purgeExpiredNonces(now: number): void {
+    for (const [nonce, entry] of rpcNonces) if (entry.expiresAt <= now) rpcNonces.delete(nonce);
+  }
+
+  function headerValue(req: IncomingMessage, name: string): string | undefined {
+    const raw = req.headers[name];
+    const value = Array.isArray(raw) ? raw[0] : raw;
+    return typeof value === "string" ? value.trim() : undefined;
+  }
+
+  function readBody(req: IncomingMessage, res: ServerResponse, limit: number, onBody: (text: string) => void): void {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let responded = false;
+    req.on("data", (chunk: Buffer) => {
+      if (responded) return;
+      size += chunk.length;
+      if (size > limit) {
+        responded = true;
+        writeJson(res, 413, { ok: false, error: makeError("invalid_request", "request body too large") });
+        // Drain rather than destroy: destroying on this tick can truncate the
+        // 413 we just wrote.
+        req.resume();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      if (responded) return;
+      responded = true;
+      onBody(Buffer.concat(chunks).toString("utf8"));
+    });
+  }
+
+  /**
+   * Step one of an `/rpc` call: the caller sends a fresh nonce, the bridge answers
+   * with its own nonce and a proof that it holds the token. A caller that cannot
+   * verify the proof is talking to something else and must not send the request.
+   */
+  function handleChallenge(req: IncomingMessage, res: ServerResponse): void {
+    readBody(req, res, MAX_CHALLENGE_BODY_BYTES, (text) => {
+      let body: unknown;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        writeJson(res, 400, { ok: false, error: makeError("invalid_request", "body must be JSON") });
+        return;
+      }
+      const clientNonce = isPlainObject(body) ? body["clientNonce"] : undefined;
+      if (!isNonce(clientNonce)) {
+        writeJson(res, 400, { ok: false, error: makeError("invalid_request", "clientNonce must be a 32-byte base64url nonce") });
+        return;
+      }
+      const now = Date.now();
+      purgeExpiredNonces(now);
+      while (rpcNonces.size >= MAX_OUTSTANDING_RPC_NONCES) {
+        // Map iteration order is insertion order: the first key is the oldest.
+        const oldest = rpcNonces.keys().next().value;
+        if (oldest === undefined) break;
+        rpcNonces.delete(oldest);
+      }
+      const serverNonce = newNonce();
+      rpcNonces.set(serverNonce, { clientNonce, expiresAt: now + RPC_NONCE_TTL_MS });
+      void makeProof(options.token, PROOF_LABELS.rpcServer, [clientNonce, serverNonce]).then((serverProof) =>
+        writeJson(res, 200, { ok: true, serverNonce, serverProof }),
+      );
+    });
   }
 
   function forward(method: string, params?: JsonObject, timeoutMs?: number): Promise<JsonValue> {
@@ -354,9 +529,11 @@ export function createBridge(options: BridgeOptions): Bridge {
         tokenFingerprint,
         allowedExtensionIds,
         socketsSeen,
+        uploadDirectory: uploadDirectory ?? null,
       },
       extension: { connected: false },
     };
+    if (lastRejectedHandshake !== undefined) base.bridge.lastRejectedHandshake = lastRejectedHandshake;
     const peer = activePeer;
     if (!peer || peer.hello === null || peer.isClosed) {
       base.extension = lastDisconnectError
@@ -398,6 +575,11 @@ export function createBridge(options: BridgeOptions): Bridge {
       writeJson(res, 403, { ok: false, error: makeError("unauthorized", "loopback clients only") });
       return;
     }
+    if (!isAllowedHost(req.headers.host, listeningPort)) {
+      logger.warn("rejected unexpected Host on the http surface", { host: req.headers.host?.slice(0, 120) });
+      writeJson(res, 403, { ok: false, error: makeError("unauthorized", "host is not this bridge") });
+      return;
+    }
     // Loopback is not a security boundary in a browser: any page the user has
     // open can POST to this port. A browser always sends Origin, so a page is
     // refused here; tools without an Origin (the CLI, Cua) are still allowed.
@@ -408,21 +590,18 @@ export function createBridge(options: BridgeOptions): Bridge {
     }
     const url = new URL(req.url ?? "/", `http://${BIND_HOST}`);
 
-    if (url.pathname === "/rpc") {
+    if (url.pathname === "/auth/challenge" || url.pathname === "/rpc") {
       if (req.method !== "POST") {
         res.setHeader("allow", "POST");
-        writeJson(res, 405, { ok: false, error: makeError("invalid_request", "use POST for /rpc") });
+        writeJson(res, 405, { ok: false, error: makeError("invalid_request", `use POST for ${url.pathname}`) });
         return;
       }
-      // The command surface carries the per-install token, exactly as the
-      // extension socket does. `/health` and `/version` stay open so a human can
-      // diagnose with curl; they cannot change anything.
-      if (!httpAuthorised(req)) {
-        res.setHeader("www-authenticate", "Bearer");
-        writeJson(res, 401, { ok: false, error: makeError("unauthorized", "the bridge token is required on /rpc") });
-        return;
-      }
-      handleRpc(req, res);
+      // The command surface needs a proof of the per-install token, exactly as the
+      // extension socket does (ADR 0005); the token itself is never sent.
+      // `/health` and `/version` stay open so a human can diagnose with curl; they
+      // change nothing and carry no browsing detail.
+      if (url.pathname === "/auth/challenge") handleChallenge(req, res);
+      else handleRpc(req, res);
       return;
     }
 
@@ -432,7 +611,10 @@ export function createBridge(options: BridgeOptions): Bridge {
       return;
     }
     if (url.pathname === "/health") {
-      void healthView(true).then((body) => writeJson(res, 200, body));
+      // Bridge state only. The extension's own health includes its recent audit
+      // trail and any open dialog text, so it is served to authenticated callers
+      // only (`/rpc` method `health`).
+      void healthView(false).then((body) => writeJson(res, 200, body));
       return;
     }
     if (url.pathname === "/version") {
@@ -448,48 +630,68 @@ export function createBridge(options: BridgeOptions): Bridge {
    * envelope. No retries, no defaulting: unknown or unbuilt methods fail closed.
    */
   function handleRpc(req: IncomingMessage, res: ServerResponse): void {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    let responded = false;
-    req.on("data", (chunk: Buffer) => {
-      if (responded) return;
-      size += chunk.length;
-      if (size > MAX_RPC_BODY_BYTES) {
-        responded = true;
-        writeJson(res, 413, { ok: false, error: makeError("invalid_request", "request body too large") });
-        // Drain rather than destroy: destroying on this tick can truncate the
-        // 413 we just wrote.
-        req.resume();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on("end", () => {
-      if (responded) return;
-      responded = true;
-      let body: unknown;
-      try {
-        body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-      } catch {
-        writeJson(res, 400, { ok: false, error: makeError("invalid_request", "body must be JSON") });
-        return;
-      }
-      const parsed = parseRequestEnvelope(body);
-      if (!parsed.ok) {
-        writeJson(res, 400, { ok: false, error: parsed.error });
-        return;
-      }
-      const envelope = parsed.value;
-      if (!isV1Method(envelope.method)) {
-        writeJson(res, 400, { ok: false, error: makeError("unknown_method", `unknown method: ${envelope.method}`) });
-        return;
-      }
-      const timeout = LONG_RUNNING_METHODS.has(envelope.method) ? LONG_RUNNING_TIMEOUT_MS : undefined;
-      forward(envelope.method, envelope.params, timeout)
-        .then((result) => writeJson(res, 200, okResponse(envelope.id, result)))
-        .catch((error: unknown) => {
-          writeJson(res, 200, errorResponse(envelope.id, commandFailure(error)));
-        });
+    const serverNonce = headerValue(req, RPC_NONCE_HEADER);
+    const proof = headerValue(req, RPC_PROOF_HEADER);
+    const unauthorised = (): void => {
+      writeJson(res, 401, {
+        ok: false,
+        error: makeError("unauthorized", "a fresh token proof is required on /rpc (POST /auth/challenge first)"),
+      });
+    };
+    readBody(req, res, MAX_RPC_BODY_BYTES, (text) => {
+      void (async () => {
+        purgeExpiredNonces(Date.now());
+        const issued = serverNonce !== undefined ? rpcNonces.get(serverNonce) : undefined;
+        // Single use, spent whether or not the proof checks out: a nonce is never
+        // a second chance.
+        if (serverNonce !== undefined) rpcNonces.delete(serverNonce);
+        if (serverNonce === undefined || issued === undefined) {
+          unauthorised();
+          return;
+        }
+        if (!(await verifyProof(options.token, PROOF_LABELS.rpcClient, [serverNonce, await sha256Hex(text)], proof))) {
+          logger.warn("rejected /rpc: proof mismatch");
+          unauthorised();
+          return;
+        }
+        const reply = (status: number, body: unknown): void => {
+          void writeSignedJson(res, status, body, serverNonce);
+        };
+        let body: unknown;
+        try {
+          body = JSON.parse(text);
+        } catch {
+          reply(400, { ok: false, error: makeError("invalid_request", "body must be JSON") });
+          return;
+        }
+        const parsed = parseRequestEnvelope(body);
+        if (!parsed.ok) {
+          reply(400, { ok: false, error: parsed.error });
+          return;
+        }
+        const envelope = parsed.value;
+        if (!isV1Method(envelope.method)) {
+          reply(400, { ok: false, error: makeError("unknown_method", `unknown method: ${envelope.method}`) });
+          return;
+        }
+        let params = envelope.params;
+        if (envelope.method === "page.upload" && params !== undefined) {
+          // The bridge, not the extension, owns the filesystem check: it is the
+          // only side that can resolve symlinks on this machine.
+          const files = resolveUploadPaths(params["files"], uploadDirectory);
+          if (!files.ok) {
+            reply(200, errorResponse(envelope.id, files.error));
+            return;
+          }
+          params = { ...params, files: files.files };
+        }
+        const timeout = LONG_RUNNING_METHODS.has(envelope.method) ? LONG_RUNNING_TIMEOUT_MS : undefined;
+        forward(envelope.method, params, timeout)
+          .then((result) => reply(200, okResponse(envelope.id, result)))
+          .catch((error: unknown) => {
+            reply(200, errorResponse(envelope.id, commandFailure(error)));
+          });
+      })();
     });
   }
 
@@ -505,6 +707,20 @@ export function createBridge(options: BridgeOptions): Bridge {
       logger.warn("rejected non-loopback upgrade", { remote });
       rejectUpgrade(socket, 403, "Forbidden");
       return;
+    }
+    if (!isAllowedHost(req.headers.host, listeningPort)) {
+      logger.warn("rejected upgrade: unexpected Host", { host: req.headers.host?.slice(0, 120) });
+      rejectUpgrade(socket, 403, "Forbidden");
+      return;
+    }
+    if (pendingConnections.size >= MAX_PENDING_CONNECTIONS) {
+      // Evict the oldest socket still mid-handshake (Set order is insertion order).
+      const oldest = pendingConnections.values().next().value;
+      if (oldest !== undefined) {
+        logger.warn("evicting the oldest socket mid-handshake", { pending: pendingConnections.size, sessionId: oldest.sessionId });
+        pendingConnections.delete(oldest);
+        oldest.close(WS_CLOSE.handshakeTimeout, "evicted");
+      }
     }
     const url = new URL(req.url ?? "/", `http://${BIND_HOST}`);
     if (url.pathname !== EXTENSION_PATH) {
@@ -526,82 +742,110 @@ export function createBridge(options: BridgeOptions): Bridge {
   function attachSocket(ws: WebSocket, remoteAddress: string): void {
     const peer = new ExtensionPeer(ws, remoteAddress, logger);
     pendingConnections.add(peer);
-    let authenticated = false;
+    /**
+     * A refusal before the peer proved the token. Any local process can cause
+     * one, so it is reported apart from the authenticated session's own errors
+     * and can never overwrite them (ADR 0005).
+     */
+    const refuse = (error: ErrorPayload, closeCode: number, reason: string, sendError: boolean): void => {
+      peer.rejection = error;
+      lastRejectedHandshake = { at: new Date().toISOString(), error };
+      if (sendError) peer.send({ type: "hello_error", error });
+      peer.close(closeCode, reason);
+    };
     const handshakeTimer = setTimeout(() => {
-      if (authenticated) return;
-      logger.warn("handshake timeout", { sessionId: peer.sessionId });
-      peer.rejection = makeError("timeout", "the extension did not complete the handshake in time");
-      lastDisconnectError = peer.rejection;
-      peer.close(WS_CLOSE.handshakeTimeout, "handshake timeout");
+      if (peer.stage === "done") return;
+      logger.warn("handshake timeout", { sessionId: peer.sessionId, stage: peer.stage });
+      refuse(makeError("timeout", "the extension did not complete the handshake in time"), WS_CLOSE.handshakeTimeout, "handshake timeout", false);
     }, HANDSHAKE_TIMEOUT_MS);
 
     ws.on("pong", () => peer.touch());
     ws.on("message", (data: Buffer) => {
       peer.touch();
+      if (peer.stage !== "done" && data.length > MAX_PREAUTH_FRAME_BYTES) {
+        logger.warn("pre-auth frame too large", { bytes: data.length });
+        refuse(makeError("invalid_request", "handshake frame too large"), WS_CLOSE.malformed, "frame too large", false);
+        return;
+      }
       let parsed: unknown;
       try {
         parsed = JSON.parse(data.toString("utf8"));
       } catch {
         logger.warn("malformed JSON frame");
-        peer.close(WS_CLOSE.malformed, "malformed json");
+        if (peer.stage !== "done") refuse(makeError("invalid_request", "malformed json"), WS_CLOSE.malformed, "malformed json", false);
+        else peer.close(WS_CLOSE.malformed, "malformed json");
         return;
       }
 
-      if (!authenticated) {
+      if (peer.stage === "hello") {
         if (!isClientHello(parsed)) {
-          peer.send({ type: "hello_error", error: makeError("invalid_request", "expected hello") });
-          peer.close(WS_CLOSE.malformed, "expected hello");
+          refuse(makeError("invalid_request", "expected hello"), WS_CLOSE.malformed, "expected hello", true);
           return;
         }
-        authenticated = true;
-        clearTimeout(handshakeTimer);
         if (parsed.protocolVersion !== PROTOCOL_VERSION) {
-          logger.warn("protocol mismatch", {
-            peer: parsed.protocolVersion,
-            bridge: PROTOCOL_VERSION,
-          });
-          peer.rejection = makeError("protocol_mismatch", `protocol ${PROTOCOL_VERSION} required`);
-          // Recorded now, not in the close handler: /health must not be able to
-          // read a half-finished rejection and report `connected:false` with no
-          // reason.
-          lastDisconnectError = peer.rejection;
-          peer.send({ type: "hello_error", error: peer.rejection });
-          peer.close(WS_CLOSE.protocolMismatch, "protocol mismatch");
+          logger.warn("protocol mismatch", { peer: parsed.protocolVersion, bridge: PROTOCOL_VERSION });
+          refuse(makeError("protocol_mismatch", `protocol ${PROTOCOL_VERSION} required`), WS_CLOSE.protocolMismatch, "protocol mismatch", true);
           return;
         }
-        if (!tokensMatch(parsed.token, options.token)) {
-          logger.warn("rejected hello: token mismatch", {
-            providedFingerprint: fingerprint(parsed.token),
-            expectedFingerprint: tokenFingerprint,
-          });
-          peer.rejection = makeError("unauthorized", "token rejected");
-          lastDisconnectError = peer.rejection;
-          peer.send({ type: "hello_error", error: peer.rejection });
-          peer.close(WS_CLOSE.unauthorized, "unauthorized");
-          return;
-        }
-        const previous = activePeer;
-        if (previous && !previous.isClosed) {
-          logger.info("replacing existing extension connection", { replacedSession: previous.sessionId });
-          previous.close(WS_CLOSE.replaced, "replaced_by_new_connection");
-        }
+        // The bridge proves itself first, so a client never hands anything
+        // token-derived to whatever else might be answering on this port.
+        peer.stage = "proving";
         peer.attachHello(parsed);
-        pendingConnections.delete(peer);
-        activePeer = peer;
-        lastDisconnectError = undefined;
-        peer.send({
-          type: "hello_ok",
-          protocolVersion: PROTOCOL_VERSION,
-          sessionId: peer.sessionId,
-          server: { name: BRIDGE_PRODUCT_NAME, version: BRIDGE_VERSION },
+        peer.clientNonce = parsed.clientNonce;
+        peer.serverNonce = newNonce();
+        void makeProof(options.token, PROOF_LABELS.wsServer, [peer.clientNonce, peer.serverNonce]).then((serverProof) => {
+          if (peer.isClosed) return;
+          peer.stage = "auth";
+          peer.send({ type: "hello_challenge", serverNonce: peer.serverNonce, serverProof });
         });
-        logger.info("extension connected", {
-          sessionId: peer.sessionId,
-          extensionId: parsed.client.extensionId,
-          extensionVersion: parsed.client.version,
-          resumed: parsed.client.resumed ?? false,
-          tokenFingerprint,
+        return;
+      }
+
+      if (peer.stage === "auth") {
+        if (!isClientAuth(parsed)) {
+          refuse(makeError("invalid_request", "expected hello_auth"), WS_CLOSE.malformed, "expected hello_auth", true);
+          return;
+        }
+        peer.stage = "verifying";
+        void verifyProof(options.token, PROOF_LABELS.wsClient, [peer.clientNonce, peer.serverNonce], parsed.clientProof).then((valid) => {
+          if (peer.isClosed) return;
+          if (!valid) {
+            logger.warn("rejected hello: client proof mismatch", { expectedFingerprint: tokenFingerprint });
+            refuse(makeError("unauthorized", "token rejected"), WS_CLOSE.unauthorized, "unauthorized", true);
+            return;
+          }
+          clearTimeout(handshakeTimer);
+          peer.stage = "done";
+          const previous = activePeer;
+          if (previous && !previous.isClosed) {
+            logger.info("replacing existing extension connection", { replacedSession: previous.sessionId });
+            previous.close(WS_CLOSE.replaced, "replaced_by_new_connection");
+          }
+          pendingConnections.delete(peer);
+          activePeer = peer;
+          lastDisconnectError = undefined;
+          peer.send({
+            type: "hello_ok",
+            protocolVersion: PROTOCOL_VERSION,
+            sessionId: peer.sessionId,
+            server: { name: BRIDGE_PRODUCT_NAME, version: BRIDGE_VERSION },
+          });
+          const hello = peer.hello;
+          logger.info("extension connected", {
+            sessionId: peer.sessionId,
+            extensionId: hello?.client.extensionId,
+            extensionVersion: hello?.client.version,
+            resumed: hello?.client.resumed ?? false,
+            tokenFingerprint,
+          });
         });
+        return;
+      }
+
+      if (peer.stage !== "done") {
+        // A frame while a proof is being computed or checked: the peer did not
+        // wait for its turn. Nothing it sends before `hello_ok` is acted on.
+        refuse(makeError("invalid_request", "frame sent before the handshake completed"), WS_CLOSE.malformed, "out of turn", false);
         return;
       }
 
@@ -662,7 +906,7 @@ export function createBridge(options: BridgeOptions): Bridge {
     if (envelope.method === "health") {
       // Bridge-side health without recursion back into the extension.
       void healthView(false).then((body) =>
-        peer.send(okResponse(envelope.id, { bridge: body.bridge, extension: { connected: true } } as JsonValue)),
+        peer.send(okResponse(envelope.id, { bridge: body.bridge, extension: { connected: true } } as unknown as JsonValue)),
       );
       return;
     }

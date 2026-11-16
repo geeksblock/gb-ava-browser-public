@@ -1,7 +1,31 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { request as httpRequest } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import WebSocket from "ws";
-import { PROTOCOL_VERSION, WS_CLOSE, createLogger, makeError, okResponse, type JsonObject } from "@gb-ava/protocol";
-import { createBridge, isAllowedOrigin, isLoopbackAddress, type Bridge } from "../../bridge/src/server.js";
+import {
+  PROOF_LABELS,
+  PROTOCOL_VERSION,
+  WS_CLOSE,
+  createLogger,
+  makeError,
+  makeProof,
+  newNonce,
+  okResponse,
+  provenRpc,
+  sha256Hex,
+  verifyProof,
+  type JsonObject,
+} from "@gb-ava/protocol";
+import {
+  createBridge,
+  isAllowedHost,
+  isAllowedOrigin,
+  isLoopbackAddress,
+  resolveUploadPaths,
+  type Bridge,
+} from "../../bridge/src/server.js";
 
 const TOKEN = "test-token-0123456789-abcdefghijklmnop";
 const silent = createLogger({ scope: "test", sink: () => {}, level: "error" });
@@ -21,7 +45,7 @@ afterEach(async () => {
 });
 
 async function startBridge(
-  overrides: { allowedExtensionIds?: string[]; healthTimeoutMs?: number; requestTimeoutMs?: number } = {},
+  overrides: { allowedExtensionIds?: string[]; healthTimeoutMs?: number; requestTimeoutMs?: number; uploadDirectory?: string } = {},
 ) {
   const bridge = createBridge({
     port: 0,
@@ -30,23 +54,58 @@ async function startBridge(
     allowedExtensionIds: overrides.allowedExtensionIds ?? [],
     healthTimeoutMs: overrides.healthTimeoutMs ?? 500,
     requestTimeoutMs: overrides.requestTimeoutMs ?? 10_000,
+    ...(overrides.uploadDirectory === undefined ? {} : { uploadDirectory: overrides.uploadDirectory }),
   });
   const address = await bridge.start();
   bridges.push(bridge);
   return { bridge, port: address.port };
 }
 
-async function rpc(
+/** An authenticated call, exactly as the CLI makes it (ADR 0005). */
+async function rpc(port: number, body: unknown): Promise<{ status: number; json: Record<string, unknown> }> {
+  const result = await provenRpc({ host: "127.0.0.1", port, token: TOKEN, body: JSON.stringify(body), timeoutMs: 20_000 });
+  return { status: result.status, json: (result.body ?? {}) as Record<string, unknown> };
+}
+
+/** A raw POST with whatever headers a test wants, for the refusal paths. */
+async function rawRpc(
   port: number,
-  body: unknown,
-  headers: Record<string, string> = { authorization: `Bearer ${TOKEN}` },
-): Promise<{ status: number; json: Record<string, unknown> }> {
+  body: string,
+  headers: Record<string, string> = {},
+): Promise<{ status: number; json: Record<string, unknown>; responseProof: string | null }> {
   const response = await fetch(`http://127.0.0.1:${port}/rpc`, {
     method: "POST",
     headers: { "content-type": "application/json", ...headers },
-    body: JSON.stringify(body),
+    body,
   });
-  return { status: response.status, json: (await response.json()) as Record<string, unknown> };
+  return {
+    status: response.status,
+    json: (await response.json()) as Record<string, unknown>,
+    responseProof: response.headers.get("x-ava-response-proof"),
+  };
+}
+
+async function challenge(port: number, headers: Record<string, string> = {}) {
+  const clientNonce = newNonce();
+  const response = await fetch(`http://127.0.0.1:${port}/auth/challenge`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify({ clientNonce }),
+  });
+  const json = (await response.json()) as { ok?: boolean; serverNonce: string; serverProof: string };
+  return { status: response.status, clientNonce, ...json };
+}
+
+/** A request with an arbitrary Host header, which fetch() will not let a caller set. */
+function getWithHost(port: number, path: string, host: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({ host: "127.0.0.1", port, path, method: "GET", headers: { host } }, (res) => {
+      res.resume();
+      resolve(res.statusCode ?? 0);
+    });
+    req.on("error", reject);
+    req.end();
+  });
 }
 
 /** Stop the helper's default "reply ok" and answer every method with an error envelope. */
@@ -67,9 +126,19 @@ interface FakeExtension {
   closed: Promise<number>;
 }
 
+/**
+ * A stand-in for the extension that runs the real v2 handshake: hello with a
+ * nonce, verify the bridge's proof, answer with its own (ADR 0005).
+ */
 function connectFake(
   port: number,
-  options: { token?: string; origin?: string; onRequest?: (method: string, reply: (result: unknown) => void) => void } = {},
+  options: {
+    token?: string;
+    origin?: string;
+    onRequest?: (method: string, reply: (result: unknown) => void) => void;
+    /** Records whether the bridge's proof verified against `token`. */
+    onChallenge?: (verified: boolean) => void;
+  } = {},
 ): Promise<FakeExtension> {
   return new Promise((resolve, reject) => {
     const headers: Record<string, string> = {};
@@ -83,12 +152,14 @@ function connectFake(
       socket.on("close", (code) => closeResolve(code));
     });
 
+    const clientNonce = newNonce();
+    const token = options.token ?? TOKEN;
     socket.on("open", () => {
       socket.send(
         JSON.stringify({
           type: "hello",
           protocolVersion: PROTOCOL_VERSION,
-          token: options.token ?? TOKEN,
+          clientNonce,
           client: { name: "fake-extension", version: "0.0.0-test" },
         }),
       );
@@ -97,6 +168,16 @@ function connectFake(
     socket.on("message", (data) => {
       const parsed = JSON.parse(String(data)) as Record<string, unknown>;
       received.push(parsed);
+      if (parsed["type"] === "hello_challenge") {
+        const serverNonce = String(parsed["serverNonce"]);
+        void (async () => {
+          const verified = await verifyProof(token, PROOF_LABELS.wsServer, [clientNonce, serverNonce], parsed["serverProof"]);
+          options.onChallenge?.(verified);
+          const clientProof = await makeProof(token, PROOF_LABELS.wsClient, [clientNonce, serverNonce]);
+          socket.send(JSON.stringify({ type: "hello_auth", clientProof }));
+        })();
+        return;
+      }
       if (parsed["type"] === "hello_ok") {
         sessionId = String(parsed["sessionId"]);
         if (!settled) {
@@ -192,19 +273,18 @@ describe("bridge handshake", () => {
     // The reason has to be recorded at the moment of rejection: reading /health in
     // this window used to answer `connected:false` with no reason, which is the
     // race that made this suite fail in CI while passing alone.
+    // A refusal before the peer proved the token is recorded apart from the
+    // extension's own state: any local process can cause one (ADR 0005).
     const duringRejection = await bridge.health();
     expect(duringRejection.extension.connected).toBe(false);
-    if (!duringRejection.extension.connected) {
-      expect(duringRejection.extension.lastError?.code).toBe("unauthorized");
-    }
+    expect(duringRejection.bridge.lastRejectedHandshake?.error.code).toBe("unauthorized");
     const closeCode = await fake.closed;
     expect(closeCode).toBe(WS_CLOSE.unauthorized);
     expect(JSON.stringify(fake.received)).not.toContain(TOKEN);
     const health = await bridge.health();
     expect(health.extension.connected).toBe(false);
-    if (!health.extension.connected) {
-      expect(health.extension.lastError?.code).toBe("unauthorized");
-    }
+    if (!health.extension.connected) expect(health.extension.lastError).toBeUndefined();
+    expect(health.bridge.lastRejectedHandshake?.error.code).toBe("unauthorized");
   });
 
   it("refuses a non-extension origin at the HTTP upgrade", async () => {
@@ -286,14 +366,30 @@ describe("bridge command semantics", () => {
     expect(unknownReply).toMatchObject({ ok: false, error: { code: "unknown_method" } });
   });
 
-  it("answers the HTTP health endpoint with the extension block", async () => {
+  it("answers the HTTP health endpoint with the extension block, but never its detail", async () => {
     const { port } = await startBridge();
-    await connectFake(port, { onRequest: (_m, reply) => reply(fakeHealth) });
+    let forwarded = 0;
+    await connectFake(port, {
+      onRequest: (_m, reply) => {
+        forwarded += 1;
+        reply({ ...fakeHealth, audit: { recent: [{ method: "tabs.navigate", args: "https://private.example/" }] } });
+      },
+    });
     const response = await fetch(`http://127.0.0.1:${port}/health`);
     expect(response.status).toBe(200);
     const body = (await response.json()) as JsonObject;
     expect(body["ok"]).toBe(true);
-    expect((body["extension"] as JsonObject)["connected"]).toBe(true);
+    const extension = body["extension"] as JsonObject;
+    expect(extension["connected"]).toBe(true);
+    // The audit trail and dialog text live in the extension's health, which the
+    // tokenless endpoint must not fetch or carry (ADR 0005).
+    expect(extension["health"]).toBeNull();
+    expect(JSON.stringify(body)).not.toContain("private.example");
+    expect(forwarded).toBe(0);
+    // An authenticated caller still gets it.
+    const detail = await rpc(port, { id: "h1", method: "health" });
+    expect(detail.json["ok"]).toBe(true);
+    expect(JSON.stringify(detail.json)).toContain("private.example");
   });
 
   it("404s an unknown HTTP route with the standard error shape", async () => {
@@ -411,36 +507,86 @@ describe("large replies", () => {
   });
 });
 
-describe("the http surface is authenticated", () => {
-  it("refuses /rpc without the token", async () => {
+describe("the http surface is authenticated (ADR 0005)", () => {
+  it("refuses /rpc with no proof, and never forwards", async () => {
     const { port } = await startBridge();
-    const { status, json } = await rpc(port, { id: "n1", method: "health" }, {});
+    const { status, json } = await rawRpc(port, JSON.stringify({ id: "n1", method: "health" }));
     expect(status).toBe(401);
     expect((json["error"] as { code: string }).code).toBe("unauthorized");
   });
 
-  it("refuses /rpc with a wrong token", async () => {
+  it("no longer accepts the raw token as a bearer or x-ava-token header", async () => {
     const { port } = await startBridge();
-    const { status } = await rpc(port, { id: "n2", method: "health" }, { authorization: `Bearer ${"x".repeat(33)}` });
-    expect(status).toBe(401);
+    const body = JSON.stringify({ id: "n2", method: "health" });
+    expect((await rawRpc(port, body, { authorization: `Bearer ${TOKEN}` })).status).toBe(401);
+    expect((await rawRpc(port, body, { "x-ava-token": TOKEN })).status).toBe(401);
   });
 
-  it("accepts the token as a bearer header or as x-ava-token", async () => {
+  it("proves itself in the challenge before the caller sends anything token-derived", async () => {
     const { port } = await startBridge();
-    const bearer = await rpc(port, { id: "n3", method: "health" });
-    expect(bearer.status).toBe(200);
-    const header = await rpc(port, { id: "n4", method: "health" }, { "x-ava-token": TOKEN });
-    expect(header.status).toBe(200);
+    const issued = await challenge(port);
+    expect(issued.status).toBe(200);
+    expect(await verifyProof(TOKEN, PROOF_LABELS.rpcServer, [issued.clientNonce, issued.serverNonce], issued.serverProof)).toBe(true);
+    // ...and that proof is worthless to anyone holding a different token.
+    expect(
+      await verifyProof("x".repeat(43), PROOF_LABELS.rpcServer, [issued.clientNonce, issued.serverNonce], issued.serverProof),
+    ).toBe(false);
   });
 
-  it("refuses a page origin on both /rpc and /health", async () => {
+  it("accepts a correct proof once, refuses the replay, and signs its answer", async () => {
     const { port } = await startBridge();
-    const rpcResult = await rpc(
-      port,
-      { id: "n5", method: "health" },
-      { authorization: `Bearer ${TOKEN}`, origin: "https://example.com" },
-    );
-    expect(rpcResult.status).toBe(403);
+    const issued = await challenge(port);
+    const body = JSON.stringify({ id: "n3", method: "health" });
+    const proof = await makeProof(TOKEN, PROOF_LABELS.rpcClient, [issued.serverNonce, await sha256Hex(body)]);
+    const headers = { "x-ava-nonce": issued.serverNonce, "x-ava-proof": proof };
+    const first = await rawRpc(port, body, headers);
+    expect(first.status).toBe(200);
+    expect(
+      await verifyProof(TOKEN, PROOF_LABELS.rpcResponse, [issued.serverNonce, await sha256Hex(JSON.stringify(first.json))], first.responseProof),
+    ).toBe(true);
+    const replay = await rawRpc(port, body, headers);
+    expect(replay.status).toBe(401);
+  });
+
+  it("binds the proof to the exact body: a swapped request is refused", async () => {
+    const { port } = await startBridge();
+    const issued = await challenge(port);
+    const signed = JSON.stringify({ id: "n4", method: "health" });
+    const proof = await makeProof(TOKEN, PROOF_LABELS.rpcClient, [issued.serverNonce, await sha256Hex(signed)]);
+    const swapped = JSON.stringify({ id: "n4", method: "tabs.close", params: { tabIds: [1] } });
+    const result = await rawRpc(port, swapped, { "x-ava-nonce": issued.serverNonce, "x-ava-proof": proof });
+    expect(result.status).toBe(401);
+  });
+
+  it("refuses a proof made with the wrong token, and spends the nonce", async () => {
+    const { port } = await startBridge();
+    const issued = await challenge(port);
+    const body = JSON.stringify({ id: "n5", method: "health" });
+    const wrong = await makeProof("y".repeat(43), PROOF_LABELS.rpcClient, [issued.serverNonce, await sha256Hex(body)]);
+    expect((await rawRpc(port, body, { "x-ava-nonce": issued.serverNonce, "x-ava-proof": wrong })).status).toBe(401);
+    const right = await makeProof(TOKEN, PROOF_LABELS.rpcClient, [issued.serverNonce, await sha256Hex(body)]);
+    expect((await rawRpc(port, body, { "x-ava-nonce": issued.serverNonce, "x-ava-proof": right })).status).toBe(401);
+  });
+
+  it("a flood of challenges cannot lock out a real caller", async () => {
+    const { port } = await startBridge();
+    await Promise.all(Array.from({ length: 1_100 }, () => challenge(port)));
+    const { status, json } = await rpc(port, { id: "after-flood", method: "health" });
+    expect(status).toBe(200);
+    expect((json["error"] as { code: string }).code).toBe("extension_disconnected");
+  });
+
+  it("the client refuses a bridge that cannot prove the token", async () => {
+    const { port } = await startBridge();
+    await expect(
+      provenRpc({ host: "127.0.0.1", port, token: "z".repeat(43), body: JSON.stringify({ id: "n6", method: "health" }), timeoutMs: 5_000 }),
+    ).rejects.toThrow(/could not prove/);
+  });
+
+  it("refuses a page origin on /rpc, /auth/challenge and /health", async () => {
+    const { port } = await startBridge();
+    expect((await rawRpc(port, "{}", { origin: "https://example.com" })).status).toBe(403);
+    expect((await challenge(port, { origin: "https://example.com" })).status).toBe(403);
     const health = await fetch(`http://127.0.0.1:${port}/health`, { headers: { origin: "https://example.com" } });
     expect(health.status).toBe(403);
   });
@@ -455,17 +601,173 @@ describe("the http surface is authenticated", () => {
 
   it("accepts the extension's own origin when an allowlist is configured", async () => {
     const { port } = await startBridge({ allowedExtensionIds: ["abcdefghijklmnop"] });
-    const allowed = await rpc(
-      port,
-      { id: "n6", method: "health" },
-      { authorization: `Bearer ${TOKEN}`, origin: "chrome-extension://abcdefghijklmnop" },
-    );
-    expect(allowed.status).toBe(200);
-    const refused = await rpc(
-      port,
-      { id: "n7", method: "health" },
-      { authorization: `Bearer ${TOKEN}`, origin: "chrome-extension://otherid" },
-    );
-    expect(refused.status).toBe(403);
+    expect((await challenge(port, { origin: "chrome-extension://abcdefghijklmnop" })).status).toBe(200);
+    expect((await challenge(port, { origin: "chrome-extension://otherid" })).status).toBe(403);
+  });
+});
+
+describe("DNS rebinding (ADR 0005)", () => {
+  it("accepts only this listener's own names as Host", () => {
+    expect(isAllowedHost("127.0.0.1:8765", 8765)).toBe(true);
+    expect(isAllowedHost("localhost:8765", 8765)).toBe(true);
+    expect(isAllowedHost("[::1]:8765", 8765)).toBe(true);
+    expect(isAllowedHost("attacker.example:8765", 8765)).toBe(false);
+    expect(isAllowedHost("127.0.0.1:9999", 8765)).toBe(false);
+    expect(isAllowedHost(undefined, 8765)).toBe(false);
+  });
+
+  it("refuses a rebound request on every route, including /health", async () => {
+    const { port } = await startBridge();
+    expect(await getWithHost(port, "/health", `attacker.example:${port}`)).toBe(403);
+    expect(await getWithHost(port, "/version", `attacker.example:${port}`)).toBe(403);
+    expect(await getWithHost(port, "/health", `127.0.0.1:${port}`)).toBe(200);
+  });
+
+  it("refuses a rebound socket upgrade", async () => {
+    const { port } = await startBridge();
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/extension`, { headers: { host: `attacker.example:${port}` } });
+    sockets.push(socket);
+    await expect(
+      new Promise((resolve, reject) => {
+        socket.on("open", resolve);
+        socket.on("error", reject);
+      }),
+    ).rejects.toThrow(/403/);
+  });
+});
+
+describe("the socket handshake (ADR 0005)", () => {
+  it("the bridge proves the token first, and the hello never carries it", async () => {
+    const { port } = await startBridge();
+    let verified: boolean | null = null;
+    const fake = await connectFake(port, { onChallenge: (ok) => (verified = ok) });
+    expect(verified).toBe(true);
+    expect(fake.sessionId).not.toBe("");
+  });
+
+  it("a request sent before the handshake completes closes the socket and is never answered", async () => {
+    const { port } = await startBridge();
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/extension`);
+    sockets.push(socket);
+    const frames: string[] = [];
+    socket.on("message", (data) => frames.push(String(data)));
+    const closed = new Promise<number>((resolve) => socket.on("close", (code) => resolve(code)));
+    await new Promise((resolve) => socket.on("open", resolve));
+    socket.send(JSON.stringify({ type: "hello", protocolVersion: PROTOCOL_VERSION, clientNonce: newNonce(), client: { name: "x", version: "0" } }));
+    socket.send(JSON.stringify({ id: "early", method: "health" }));
+    expect(await closed).toBe(WS_CLOSE.malformed);
+    expect(frames.some((frame) => frame.includes('"early"'))).toBe(false);
+  });
+
+  it("refuses an oversized frame before authentication", async () => {
+    const { bridge, port } = await startBridge();
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/extension`);
+    sockets.push(socket);
+    const closed = new Promise<number>((resolve) => socket.on("close", (code) => resolve(code)));
+    await new Promise((resolve) => socket.on("open", resolve));
+    socket.send("x".repeat(10_000));
+    expect(await closed).toBe(WS_CLOSE.malformed);
+    expect((await bridge.health()).bridge.lastRejectedHandshake?.error.message).toMatch(/too large/);
+  });
+
+  it("idle sockets mid-handshake cannot lock the real extension out: the oldest is evicted", async () => {
+    const { bridge, port } = await startBridge();
+    const idle: Array<{ socket: WebSocket; closed: Promise<number> }> = [];
+    for (let i = 0; i < 8; i += 1) {
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/extension`);
+      sockets.push(socket);
+      const closed = new Promise<number>((resolve) => socket.on("close", (code) => resolve(code)));
+      await new Promise((resolve) => socket.on("open", resolve));
+      idle.push({ socket, closed });
+    }
+    // The real extension still gets in, and the oldest idle socket is the one dropped.
+    const fake = await connectFake(port, { onRequest: (_m, reply) => reply(fakeHealth) });
+    expect(fake.sessionId).not.toBe("");
+    expect(bridge.currentSessionId()).toBe(fake.sessionId);
+    expect(await idle[0]!.closed).toBe(WS_CLOSE.handshakeTimeout);
+  });
+
+  it("an older client gets protocol_mismatch, not a silent drop", async () => {
+    const { bridge, port } = await startBridge();
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/extension`);
+    sockets.push(socket);
+    const frames: Array<Record<string, unknown>> = [];
+    socket.on("message", (data) => frames.push(JSON.parse(String(data)) as Record<string, unknown>));
+    const closed = new Promise<number>((resolve) => socket.on("close", (code) => resolve(code)));
+    await new Promise((resolve) => socket.on("open", resolve));
+    socket.send(JSON.stringify({ type: "hello", protocolVersion: 1, token: TOKEN, client: { name: "old", version: "0.1.0" } }));
+    expect(await closed).toBe(WS_CLOSE.protocolMismatch);
+    expect(frames[0]).toMatchObject({ type: "hello_error", error: { code: "protocol_mismatch" } });
+    expect((await bridge.health()).bridge.lastRejectedHandshake?.error.code).toBe("protocol_mismatch");
+  });
+});
+
+describe("page.upload is confined to the upload folder (ADR 0005)", () => {
+  function uploadRoot() {
+    const base = mkdtempSync(join(tmpdir(), "gb-ava-upload-test-"));
+    const root = join(base, "uploads");
+    mkdirSync(root);
+    writeFileSync(join(root, "ok.txt"), "fine\n");
+    writeFileSync(join(base, "secret.txt"), "private\n");
+    symlinkSync(join(base, "secret.txt"), join(root, "link.txt"));
+    return { base, root };
+  }
+
+  it("resolves a file inside the folder to its real path", () => {
+    const { root } = uploadRoot();
+    const result = resolveUploadPaths([join(root, "ok.txt")], root);
+    expect(result).toEqual({ ok: true, files: [realpathSync(join(root, "ok.txt"))] });
+  });
+
+  it("refuses a file outside the folder, a .. escape and a symlink that points out", () => {
+    const { base, root } = uploadRoot();
+    for (const path of [join(base, "secret.txt"), join(root, "..", "secret.txt"), join(root, "link.txt")]) {
+      const result = resolveUploadPaths([path], root);
+      expect(result.ok, path).toBe(false);
+    }
+  });
+
+  it("gives one answer for missing, outside and non-file paths, and never throws", () => {
+    const { base, root } = uploadRoot();
+    mkdirSync(join(root, "sub"));
+    const answers = [join(root, "missing.txt"), join(base, "secret.txt"), join(root, "sub"), join(base, "nope", "x")].map((path) => {
+      const result = resolveUploadPaths([path], root);
+      expect(result.ok, path).toBe(false);
+      return result.ok ? "" : result.error.message;
+    });
+    expect(new Set(answers).size).toBe(1);
+  });
+
+  it("refuses an upload folder others can write to", () => {
+    const { root } = uploadRoot();
+    chmodSync(root, 0o777);
+    const result = resolveUploadPaths([join(root, "ok.txt")], root);
+    expect(result.ok).toBe(false);
+    chmodSync(root, 0o700);
+  });
+
+  it("refuses everything when no folder is configured, and relative paths always", () => {
+    const { root } = uploadRoot();
+    expect(resolveUploadPaths([join(root, "ok.txt")], undefined).ok).toBe(false);
+    expect(resolveUploadPaths(["ok.txt"], root).ok).toBe(false);
+  });
+
+  it("the bridge refuses an outside path without forwarding, and forwards the real path inside", async () => {
+    const { base, root } = uploadRoot();
+    const seen: Array<Record<string, unknown>> = [];
+    const { port } = await startBridge({ uploadDirectory: root });
+    const fake = await connectFake(port, { onRequest: () => {} });
+    fake.socket.on("message", (data) => {
+      const frame = JSON.parse(String(data)) as Record<string, unknown>;
+      if (frame["method"] !== "page.upload") return;
+      seen.push(frame);
+      fake.socket.send(JSON.stringify(okResponse(String(frame["id"]), { count: 1 })));
+    });
+    const refused = await rpc(port, { id: "u1", method: "page.upload", params: { tabId: 1, selector: "#f", files: [join(base, "secret.txt")] } });
+    expect(refused.json["ok"]).toBe(false);
+    expect(seen).toHaveLength(0);
+    const allowed = await rpc(port, { id: "u2", method: "page.upload", params: { tabId: 1, selector: "#f", files: [join(root, "ok.txt")] } });
+    expect(allowed.json["ok"]).toBe(true);
+    expect((seen[0]?.["params"] as { files: string[] }).files).toEqual([realpathSync(join(root, "ok.txt"))]);
   });
 });

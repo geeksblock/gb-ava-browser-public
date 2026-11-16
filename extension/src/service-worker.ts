@@ -26,8 +26,14 @@ import {
   isKnownMethod,
   isPlainObject,
   isV1Method,
+  isServerChallenge,
   isServerHello,
   makeError,
+  makeProof,
+  newNonce,
+  PROOF_LABELS,
+  verifyProof,
+  WS_CLOSE,
   okResponse,
   parseActivateParams,
   parseCreateParams,
@@ -368,7 +374,7 @@ function openSocket(): void {
 
   ws.addEventListener("message", (event: MessageEvent) => {
     if (generation !== socketGeneration) return;
-    void onSocketMessage(event.data);
+    void onSocketMessage(event.data, generation);
   });
 
   ws.addEventListener("close", (event: CloseEvent) => {
@@ -432,12 +438,32 @@ async function dispatch(event: SupervisorEvent): Promise<void> {
   await runEffects(effects);
 }
 
+/**
+ * Handshake state for the current socket (ADR 0005). `verified` turns true only
+ * once the bridge has proved it holds our token; until then nothing token-derived
+ * is sent and no request from the peer is acted on.
+ */
+let handshake: {
+  generation: number;
+  clientNonce: string;
+  serverNonce: string | null;
+  verified: boolean;
+  /** Set synchronously on a verified hello_ok, before any await, so a request right behind it is served. */
+  done: boolean;
+} | null = null;
+
+const UNVERIFIED_BRIDGE_HINT =
+  "The bridge could not prove it holds the token pasted here. Paste the token again (gb-ava-bridge token), " +
+  "or make sure the real bridge is running — something else may be answering on its port.";
+
 function sendHello(): void {
   if (settings === null) return;
+  const clientNonce = newNonce();
+  handshake = { generation: socketGeneration, clientNonce, serverNonce: null, verified: false, done: false };
   const hello: ClientHello = {
     type: "hello",
     protocolVersion: PROTOCOL_VERSION,
-    token: settings.bridgeToken,
+    clientNonce,
     client: {
       name: "gb-ava-extension",
       version: chrome.runtime.getManifest().version,
@@ -452,7 +478,23 @@ function sendHello(): void {
 /* Inbound frames                                                     */
 /* ------------------------------------------------------------------ */
 
-async function onSocketMessage(data: unknown): Promise<void> {
+/** The peer failed to prove the token: drop it and wait for a human (fail closed). */
+async function rejectUnverifiedBridge(reason: string): Promise<void> {
+  lastError = `${reason}. ${UNVERIFIED_BRIDGE_HINT}`;
+  handshake = null;
+  logger.warn("bridge not verified; closing", { reason });
+  const current = socket;
+  if (current !== null) {
+    try {
+      current.close(WS_CLOSE.serverUnverified, "bridge not verified");
+    } catch {
+      // Already closing.
+    }
+  }
+  await dispatch({ type: "handshake_unverified", now: Date.now(), reason });
+}
+
+async function onSocketMessage(data: unknown, generation: number): Promise<void> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(String(data));
@@ -460,10 +502,39 @@ async function onSocketMessage(data: unknown): Promise<void> {
     logger.warn("ignored non-JSON frame from bridge");
     return;
   }
+  const current = handshake !== null && handshake.generation === generation ? handshake : null;
+
+  if (isServerChallenge(parsed)) {
+    if (current === null || current.serverNonce !== null || settings === null) {
+      await rejectUnverifiedBridge("unexpected handshake challenge");
+      return;
+    }
+    current.serverNonce = parsed.serverNonce;
+    const token = settings.bridgeToken;
+    const valid = await verifyProof(token, PROOF_LABELS.wsServer, [current.clientNonce, parsed.serverNonce], parsed.serverProof);
+    if (generation !== socketGeneration) return;
+    if (!valid) {
+      await rejectUnverifiedBridge("bridge proof did not match");
+      return;
+    }
+    current.verified = true;
+    const clientProof = await makeProof(token, PROOF_LABELS.wsClient, [current.clientNonce, parsed.serverNonce]);
+    if (generation !== socketGeneration) return;
+    send({ type: "hello_auth", clientProof });
+    return;
+  }
 
   if (isServerHello(parsed)) {
     const hello: ServerHello = parsed;
     if (hello.type === "hello_ok") {
+      if (current === null || !current.verified) {
+        // A "welcome" from a peer that never proved the token is exactly what an
+        // impostor on the port would send.
+        await rejectUnverifiedBridge("bridge skipped its proof");
+        return;
+      }
+      // Before any await: the bridge may send a request in the very next frame.
+      current.done = true;
       lastError = null;
       await markHandshaked();
       await dispatch({ type: "handshake_ok", now: Date.now(), sessionId: hello.sessionId });
@@ -472,6 +543,12 @@ async function onSocketMessage(data: unknown): Promise<void> {
       return;
     }
     const rejection = hello.error;
+    if (current === null || !current.verified) {
+      // An unproven peer's refusal is not evidence of anything: it is reported as
+      // "not verified", with the claimed reason quoted for the human.
+      await rejectUnverifiedBridge(`bridge refused before proving itself (${rejection.code}: ${rejection.message.slice(0, 120)})`);
+      return;
+    }
     lastError = `${rejection.code}: ${rejection.message}`;
     const code =
       rejection.code === "unauthorized"
@@ -484,6 +561,13 @@ async function onSocketMessage(data: unknown): Promise<void> {
   }
 
   if (isControlFrame(parsed)) return;
+
+  // Nothing from the peer is acted on before the handshake completed: a request
+  // from an unproven bridge is how an impostor on the port would drive the browser.
+  if (current === null || !current.verified || !current.done) {
+    logger.warn("ignored request before the handshake completed");
+    return;
+  }
 
   const request = parseRequestEnvelope(parsed);
   if (!request.ok) {
@@ -569,7 +653,50 @@ function parsed<T>(validation: { ok: true; value: T } | { ok: false; error: Erro
  * One method, one place. Every parameter object is validated by the shared
  * schema before a chrome.* call is made, and every failure is a protocol error.
  */
+/**
+ * Pages Ava never reads or drives (ADR 0005): the browser's own pages, any
+ * extension page — including this extension's options, where a click could flip
+ * the human-only `page.evaluate` switch — and local files.
+ */
+const PROTECTED_TAB_SCHEMES = [
+  "chrome:",
+  "chrome-extension:",
+  "chrome-untrusted:",
+  "chrome-search:",
+  "devtools:",
+  "edge:",
+  "view-source:",
+  "file:",
+];
+
+export function isProtectedTabUrl(url: string): boolean {
+  const lower = url.trim().toLowerCase();
+  return PROTECTED_TAB_SCHEMES.some((scheme) => lower.startsWith(scheme));
+}
+
+async function assertDrivableTab(tabId: number): Promise<void> {
+  let tab: chrome.tabs.Tab;
+  try {
+    tab = await chrome.tabs.get(tabId);
+  } catch {
+    // Let the method report its own not_found, with its own detail.
+    return;
+  }
+  const url = tab.pendingUrl ?? tab.url ?? "";
+  if (isProtectedTabUrl(url) || (tab.url !== undefined && isProtectedTabUrl(tab.url))) {
+    throw commandError(
+      "invalid_request",
+      "this tab is a browser, extension or local-file page; Ava does not read or act on those",
+      false,
+      { tabId },
+    );
+  }
+}
+
 async function runMethod(method: string, params: JsonObject | undefined): Promise<JsonValue> {
+  if (method.startsWith("page.") && typeof params?.["tabId"] === "number") {
+    await assertDrivableTab(params["tabId"] as number);
+  }
   switch (method) {
     case "health":
       return (await buildHealth()) as JsonValue;
@@ -988,8 +1115,35 @@ chrome.runtime.onSuspend.addListener(() => {
   void detachAll();
 });
 
-chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+/**
+ * Which of this extension's own pages may send which message. Settings changes
+ * come only from the options page, the keepalive only from the offscreen
+ * document; anything else (another context, a future content script) is ignored.
+ */
+function senderPage(sender: chrome.runtime.MessageSender): "options" | "offscreen" | null {
+  if (sender.id !== chrome.runtime.id || typeof sender.url !== "string") return null;
+  const path = sender.url.split(/[?#]/)[0];
+  if (path === chrome.runtime.getURL("options.html")) return "options";
+  if (path === chrome.runtime.getURL("offscreen.html")) return "offscreen";
+  return null;
+}
+
+const MESSAGE_SENDERS: Record<string, "options" | "offscreen"> = {
+  "ava.keepalive.tick": "offscreen",
+  "ava.status": "options",
+  "ava.reconnect": "options",
+  "ava.save": "options",
+  "ava.setEvaluate": "options",
+  "ava.clear": "options",
+};
+
+chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
   if (!isPlainObject(message) || typeof message["type"] !== "string") return false;
+  const expected = MESSAGE_SENDERS[message["type"]];
+  if (expected === undefined || senderPage(sender) !== expected) {
+    logger.warn("ignored message from an unexpected sender", { type: String(message["type"]).slice(0, 40) });
+    return false;
+  }
   switch (message["type"]) {
     case "ava.keepalive.tick":
       ticksReceived += 1;

@@ -13,12 +13,17 @@
 import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, parse, resolve, sep } from "node:path";
 
 export interface BridgeConfigFile {
   /** Extension ids allowed to connect. Empty = any `chrome-extension://` origin. */
   allowedExtensionIds: string[];
   port?: number;
+  /**
+   * The only folder `page.upload` may attach files from (ADR 0005). Absolute or
+   * starting with `~/`. Defaults to `~/Ava Uploads`, created on first run.
+   */
+  uploadDirectory?: string;
 }
 
 export interface BridgeConfig {
@@ -29,10 +34,35 @@ export interface BridgeConfig {
   tokenCreated: boolean;
   allowedExtensionIds: string[];
   port?: number;
+  uploadDirectory: string;
 }
 
 export const DEFAULT_PORT = 8765;
 export const TOKEN_BYTES = 32;
+export const DEFAULT_UPLOAD_FOLDER = "Ava Uploads";
+
+/**
+ * The upload folder is everything an agent can attach, so it must be a folder
+ * set aside for that: never the filesystem root, never the home folder itself,
+ * and never one that contains the bridge's own config (the token).
+ */
+export function assertSafeUploadDirectory(uploadDirectory: string, configDir: string, home: string = homedir()): void {
+  const target = resolve(uploadDirectory);
+  const inside = (child: string, parent: string): boolean => child === parent || child.startsWith(parent + sep);
+  if (target === parse(target).root || target === resolve(home) || inside(resolve(configDir), target)) {
+    throw new Error(
+      `uploadDirectory must be a dedicated folder (not / or your home folder, and not one containing ${configDir}): ${uploadDirectory}`,
+    );
+  }
+}
+
+/** `~/x` → home-relative; anything else must already be absolute. */
+export function expandUploadDirectory(value: string, home: string = homedir()): string {
+  const trimmed = value.trim();
+  const expanded = trimmed === "~" ? home : trimmed.startsWith("~/") ? join(home, trimmed.slice(2)) : trimmed;
+  if (!isAbsolute(expanded)) throw new Error(`uploadDirectory must be absolute or start with ~/: ${value}`);
+  return expanded;
+}
 
 export function configDirectory(env: NodeJS.ProcessEnv = process.env): string {
   const override = env["AVA_BRIDGE_CONFIG_DIR"];
@@ -114,8 +144,13 @@ export function readConfigFile(directory: string): BridgeConfigFile {
   if (port !== undefined && (typeof port !== "number" || !Number.isInteger(port) || port < 0 || port > 65535)) {
     throw new Error(`port must be an integer 0-65535: ${configPath}`);
   }
+  const uploadDirectory = record["uploadDirectory"];
+  if (uploadDirectory !== undefined && (typeof uploadDirectory !== "string" || uploadDirectory.trim().length === 0)) {
+    throw new Error(`uploadDirectory must be a non-empty string: ${configPath}`);
+  }
   const config: BridgeConfigFile = { allowedExtensionIds: (ids as string[] | undefined) ?? [] };
   if (port !== undefined) config.port = port as number;
+  if (uploadDirectory !== undefined) config.uploadDirectory = uploadDirectory as string;
   return config;
 }
 
@@ -123,6 +158,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
   const directory = configDirectory(env);
   const { token, created } = ensureToken(directory);
   const config = readConfigFile(directory);
+  // AVA_BRIDGE_UPLOAD_DIR overrides the file (the test suite uses it so a run never
+  // creates folders in the real home directory).
+  const override = env["AVA_BRIDGE_UPLOAD_DIR"];
+  const uploadDirectory = expandUploadDirectory(
+    override !== undefined && override.trim().length > 0
+      ? override
+      : (config.uploadDirectory ?? join(homedir(), DEFAULT_UPLOAD_FOLDER)),
+  );
+  // Created private and empty: the human drops into it exactly the files Ava may
+  // attach, and nothing else on the machine is reachable through page.upload.
+  assertSafeUploadDirectory(uploadDirectory, directory);
+  if (!existsSync(uploadDirectory)) mkdirSync(uploadDirectory, { recursive: true, mode: 0o700 });
   const loaded: BridgeConfig = {
     directory,
     tokenPath: join(directory, "token"),
@@ -130,6 +177,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
     token,
     tokenCreated: created,
     allowedExtensionIds: config.allowedExtensionIds,
+    uploadDirectory,
   };
   if (config.port !== undefined) loaded.port = config.port;
   return loaded;

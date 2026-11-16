@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { PROTOCOL_VERSION } from "../../shared/src/protocol.js";
 import {
   bridgeCall,
   bridgeHealth,
@@ -40,7 +41,7 @@ test("M0: extension connects, health answers from the bridge, keepalive is armed
   const health = await waitForConnected(bridge.port);
   const ext = extensionHealth(health);
 
-  expect(health.bridge.protocolVersion).toBe(1);
+  expect(health.bridge.protocolVersion).toBe(PROTOCOL_VERSION);
   expect(health.bridge.tokenConfigured).toBe(true);
   expect(health.extension.connected).toBe(true);
   if (health.extension.connected) {
@@ -109,12 +110,13 @@ test("M0: the command surface refuses a caller without the bridge token", async 
   });
   expect(anonymous.status).toBe(401);
 
-  const wrong = await fetch(`http://127.0.0.1:${bridge.port}/rpc`, {
+  // Not even the real token works as a header: it never crosses the wire (ADR 0005).
+  const rawToken = await fetch(`http://127.0.0.1:${bridge.port}/rpc`, {
     method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${"x".repeat(43)}` },
+    headers: { "content-type": "application/json", authorization: `Bearer ${bridge.token}` },
     body: JSON.stringify({ id: "wrong", method: "settings.get" }),
   });
-  expect(wrong.status).toBe(401);
+  expect(rawToken.status).toBe(401);
 
   const authorised = await bridgeCall(bridge.port, bridge.token, "settings.get");
   expect(authorised.ok).toBe(true);

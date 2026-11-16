@@ -1,6 +1,9 @@
 # ADR 0004 — the HTTP tool surface is authenticated with the per-install token
 
 Status: **accepted** (M0), supersedes the "M4 adds the operator token" line in `IMPLEMENTATION-PLAN.md` §5.
+**Amended by ADR 0005** (2026-11-15): the token still guards `/rpc`, but it is never presented —
+`Authorization: Bearer` / `x-ava-token` are no longer accepted; callers send a one-time HMAC proof
+after `POST /auth/challenge`, and `/health` no longer forwards the extension's detail.
 
 ## Context
 

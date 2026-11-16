@@ -3,7 +3,7 @@
  * (a bridge frame in, a reply frame out) against a stand-in Chrome.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { startWorker, settle, type Harness } from "./support/chrome-harness.js";
+import { completeHandshake, startWorker, settle, type Harness } from "./support/chrome-harness.js";
 import { EXTENSION_METHODS, V1_METHODS } from "@gb-ava/protocol";
 
 let worker: Harness | null = null;
@@ -215,11 +215,18 @@ describe("the grace alarm", () => {
   it("is cleared when the bridge comes back inside the window", async () => {
     const h = await boot();
     await h.call("session.start", { tabIds: [1] });
+    const before = (globalThis as any).WebSocket.instances.length;
     h.socket.fire("close", { code: 1006, reason: "gone" });
     await settle(20);
     expect(h.alarms.has("ava.ungroup-marker")).toBe(true);
+    // The worker's own backoff reconnects (first retry ~500 ms); the bridge "comes
+    // back" only on that new socket, through the full handshake (ADR 0005).
+    for (let waited = 0; waited < 3_000 && (globalThis as any).WebSocket.instances.length === before; waited += 25) {
+      await settle(25);
+    }
     const reconnected = (globalThis as any).WebSocket.instances.at(-1);
-    reconnected.fire("message", { data: JSON.stringify({ type: "hello_ok", protocolVersion: 1, sessionId: "s2" }) });
+    expect(reconnected).not.toBe(h.socket);
+    await completeHandshake(reconnected, { sessionId: "s2" });
     await settle(30);
     expect(h.alarms.has("ava.ungroup-marker")).toBe(false);
     expect(h.tabs[0].groupId).toBe(7);

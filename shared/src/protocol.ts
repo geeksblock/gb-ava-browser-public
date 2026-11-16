@@ -12,7 +12,8 @@
  *   - every response carries the request id it answers.
  */
 
-export const PROTOCOL_VERSION = 1;
+/** v2: mutual token proof, the raw token never crosses the wire (ADR 0005). */
+export const PROTOCOL_VERSION = 2;
 export const PRODUCT_NAME = "Geeksblock Ava Browser Extension";
 export const BRIDGE_PRODUCT_NAME = "gb-ava-bridge";
 export const MANUFACTURER = "Geeksblock LLC";
@@ -325,8 +326,11 @@ function parseTabIds(params: JsonObject, key: string): number[] | ValidationErr 
  * `data:` is deliberately absent: Chrome refuses a background navigation *to* a
  * data: URL ("not allowed to navigate top frame to data URL"), and a method that
  * accepts a URL the browser will silently ignore is worse than one that refuses it.
+ *
+ * `file:` is absent too (ADR 0005): with file-URL access on, an agent could open
+ * and read any local file — SSH keys, the bridge token — through page.getText.
  */
-const NAVIGABLE_SCHEMES = ["http:", "https:", "file:", "about:"];
+const NAVIGABLE_SCHEMES = ["http:", "https:", "about:"];
 
 export function isNavigableUrl(url: string): boolean {
   try {
@@ -407,7 +411,7 @@ export function parseNavigateParams(params: JsonObject | undefined): Validation<
   if (isErr(tabId)) return tabId;
   const url = readString(params, "url", MAX_URL_LENGTH);
   if (isErr(url)) return url;
-  if (!isNavigableUrl(url)) return failure("`url` must be an absolute http:, https:, file: or about: URL");
+  if (!isNavigableUrl(url)) return failure("`url` must be an absolute http:, https: or about: URL");
   return { ok: true, value: { tabId, url } };
 }
 
@@ -426,7 +430,7 @@ export function parseCreateParams(params: JsonObject | undefined): Validation<Cr
   if (unknown) return unknown;
   const url = readString(params, "url", MAX_URL_LENGTH);
   if (isErr(url)) return url;
-  if (!isNavigableUrl(url)) return failure("`url` must be an absolute http:, https:, file: or about: URL");
+  if (!isNavigableUrl(url)) return failure("`url` must be an absolute http:, https: or about: URL");
   const value: CreateParams = { url };
   if (params["windowId"] !== undefined) {
     const windowId = readInt(params, "windowId", -1, Number.MAX_SAFE_INTEGER);
@@ -932,6 +936,7 @@ export function parseSelectParams(params: JsonObject | undefined): Validation<Se
   if (isErr(target)) return target;
   const value = params["value"];
   if (typeof value !== "string") return failure("`value` must be a string");
+  if (value.length > SELECTOR_MAX) return failure(`\`value\` must be at most ${SELECTOR_MAX} characters`);
   return { ok: true, value: { tabId, target, value } };
 }
 
@@ -1057,15 +1062,25 @@ export const WS_CLOSE = {
   handshakeTimeout: 4008,
   replaced: 4009,
   malformed: 4010,
+  /** Client-side close: the peer could not prove it holds the token (ADR 0005). */
+  serverUnverified: 4011,
 } as const;
 
 export const HANDSHAKE_TIMEOUT_MS = 5_000;
 
+/**
+ * v2 handshake (ADR 0005), four frames on a fresh socket:
+ *   client -> hello            { clientNonce }            (no token, no proof)
+ *   server -> hello_challenge  { serverNonce, serverProof } (server proves first)
+ *   client -> hello_auth       { clientProof }             (only after verifying)
+ *   server -> hello_ok         { sessionId }
+ * Neither side acts on the other's requests before the exchange completes.
+ */
 export interface ClientHello {
   type: "hello";
   protocolVersion: number;
-  /** Per-install bearer token. Secret: never logged, never echoed back. */
-  token: string;
+  /** Fresh 32-byte base64url nonce. The token itself is never sent. */
+  clientNonce: string;
   client: {
     name: string;
     version: string;
@@ -1073,6 +1088,19 @@ export interface ClientHello {
     /** True when this handshake follows a previous one in the same worker lifetime (MV3 resume). */
     resumed?: boolean;
   };
+}
+
+export interface ServerChallenge {
+  type: "hello_challenge";
+  serverNonce: string;
+  /** HMAC(token, ws-server, clientNonce, serverNonce): the bridge proves it holds the token. */
+  serverProof: string;
+}
+
+export interface ClientAuth {
+  type: "hello_auth";
+  /** HMAC(token, ws-client, clientNonce, serverNonce). */
+  clientProof: string;
 }
 
 export interface ServerHelloOk {
@@ -1180,13 +1208,36 @@ export function isResponseEnvelope(input: unknown): input is ResponseEnvelope {
   return false;
 }
 
+const NONCE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+
+/**
+ * Shape only: a hello from an older client (no nonce) still parses as far as its
+ * version, so the bridge can answer `protocol_mismatch` instead of `malformed`.
+ */
 export function isClientHello(input: unknown): input is ClientHello {
   if (!isPlainObject(input) || input["type"] !== "hello") return false;
   if (typeof input["protocolVersion"] !== "number") return false;
-  if (typeof input["token"] !== "string" || input["token"].length === 0) return false;
+  if (input["protocolVersion"] === PROTOCOL_VERSION) {
+    if (typeof input["clientNonce"] !== "string" || !NONCE_PATTERN.test(input["clientNonce"])) return false;
+  }
   const client = input["client"];
   if (!isPlainObject(client)) return false;
   return typeof client["name"] === "string" && typeof client["version"] === "string";
+}
+
+export function isServerChallenge(input: unknown): input is ServerChallenge {
+  if (!isPlainObject(input) || input["type"] !== "hello_challenge") return false;
+  return (
+    typeof input["serverNonce"] === "string" &&
+    NONCE_PATTERN.test(input["serverNonce"]) &&
+    typeof input["serverProof"] === "string" &&
+    NONCE_PATTERN.test(input["serverProof"])
+  );
+}
+
+export function isClientAuth(input: unknown): input is ClientAuth {
+  if (!isPlainObject(input) || input["type"] !== "hello_auth") return false;
+  return typeof input["clientProof"] === "string" && NONCE_PATTERN.test(input["clientProof"]);
 }
 
 export function isServerHello(input: unknown): input is ServerHello {
