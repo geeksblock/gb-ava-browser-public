@@ -66,7 +66,7 @@ describe("the token comes from the config directory", () => {
   });
 
   it("refuses a host that is not this machine, because the token is sent in clear text", () => {
-    expect(() => new BridgeClient({ host: "10.70.0.4", token: "x" })).toThrow(/loopback only/);
+    expect(() => new BridgeClient({ host: "10.0.0.4", token: "x" })).toThrow(/loopback only/);
     expect(() => new BridgeClient({ host: "127.0.0.1", token: "x" })).not.toThrow();
   });
 });

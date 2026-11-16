@@ -145,7 +145,7 @@ describe("origin and address policy", () => {
     expect(isLoopbackAddress("127.0.0.1")).toBe(true);
     expect(isLoopbackAddress("::1")).toBe(true);
     expect(isLoopbackAddress("::ffff:127.0.0.1")).toBe(true);
-    expect(isLoopbackAddress("10.70.0.4")).toBe(false);
+    expect(isLoopbackAddress("10.0.0.4")).toBe(false);
     expect(isLoopbackAddress("100.100.100.100")).toBe(false);
     expect(isLoopbackAddress(undefined)).toBe(false);
   });

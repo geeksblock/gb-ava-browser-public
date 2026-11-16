@@ -72,7 +72,7 @@ describe("tabs.navigate", () => {
 
   it("knows which schemes a page can be", () => {
     expect(isNavigableUrl("https://example.com")).toBe(true);
-    expect(isNavigableUrl("http://10.70.0.4")).toBe(true);
+    expect(isNavigableUrl("http://10.0.0.4")).toBe(true);
     expect(isNavigableUrl("about:blank")).toBe(true);
     expect(isNavigableUrl("file:///tmp/x.html")).toBe(true);
     // Chrome refuses a background navigation to a data: URL, so it is refused here too.
